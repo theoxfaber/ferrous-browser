@@ -55,14 +55,14 @@ async function main() {
         
         results.navigate = await benchmark('Navigate + Content (5x)', async () => {
             const page = await browser.newPage();
-            await page.goto('https://example.com', { waitUntil: 'networkidle0' });
+            await page.goto('https://example.com', { waitUntil: 'load' });
             const content = await page.content();
             await page.close();
         }, 5);
         
         results.screenshot = await benchmark('Screenshot (5x)', async () => {
             const page = await browser.newPage();
-            await page.goto('https://example.com', { waitUntil: 'networkidle0' });
+            await page.goto('https://example.com', { waitUntil: 'load' });
             await page.screenshot();
             await page.close();
         }, 5);

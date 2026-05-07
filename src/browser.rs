@@ -160,24 +160,28 @@ impl Browser {
 
         let pid = Pid::from_raw(child.id() as i32);
 
-        // Poll until Chrome's HTTP endpoint is ready
+        // Poll until Chrome's HTTP endpoint is ready and fetch the WebSocket URL
         let deadline = tokio::time::Instant::now() + config.timeout;
-        loop {
+        let ws_url = loop {
             match reqwest::get(format!("http://localhost:{port}/json/version")).await {
-                Ok(_) => break,
-                Err(_) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(BrowserError::BrowserNotLaunched(format!(
-                            "Chrome did not start within {}s",
-                            config.timeout.as_secs()
-                        )));
+                Ok(resp) => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
+                            break url.to_string();
+                        }
                     }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
                 }
+                Err(_) => {}
             }
-        }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(BrowserError::BrowserNotLaunched(format!(
+                    "Chrome did not start within {}s",
+                    config.timeout.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
 
-        let ws_url = format!("ws://localhost:{port}");
         Self::connect_internal(ws_url, Some(pid)).await
     }
 
@@ -216,9 +220,12 @@ impl Browser {
     }
 
     async fn connect_internal(ws_url: String, pid: Option<Pid>) -> Result<Self> {
+        use futures_util::StreamExt;
         let cdp = Arc::new(CDPClient::new(ws_url));
         let ws_stream = cdp.connect().await?;
-        let conn = Connection::new(cdp.clone(), ws_stream);
+        let (sink, stream) = ws_stream.split();
+        cdp.set_sink(sink).await;
+        let conn = Connection::new(cdp.clone(), stream);
         tokio::spawn(conn.run());
         Ok(Browser {
             cdp,

@@ -7,31 +7,31 @@ use futures_util::StreamExt;
 use crate::cdp::{CDPClient, CDPMessage};
 use crate::error::Result;
 
+use futures_util::stream::SplitStream;
+
 /// Manages the WebSocket connection and message routing.
 pub struct Connection {
     cdp: Arc<CDPClient>,
-    ws_stream: Arc<RwLock<Option<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>>,
+    stream: Arc<RwLock<Option<SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>>>,
 }
 
 impl Connection {
     /// Create a new connection
     pub fn new(
         cdp: Arc<CDPClient>,
-        ws_stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        stream: SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
     ) -> Self {
         Connection {
             cdp,
-            ws_stream: Arc::new(RwLock::new(Some(ws_stream))),
+            stream: Arc::new(RwLock::new(Some(stream))),
         }
     }
 
     /// Start the connection loop.
     pub async fn run(self) -> Result<()> {
-        let mut ws_guard = self.ws_stream.write().await;
-        if let Some(ws) = ws_guard.take() {
-            let (sink, mut stream) = ws.split();
-            drop(ws_guard);
-            self.cdp.set_sink(sink).await;
+        let mut stream_guard = self.stream.write().await;
+        if let Some(mut stream) = stream_guard.take() {
+            drop(stream_guard);
             loop {
                 match stream.next().await {
                     Some(Ok(Message::Text(text))) => {
