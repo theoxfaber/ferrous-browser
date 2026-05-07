@@ -164,18 +164,20 @@ page.goto("https://example.com", WaitUntil::Load)
 
 ## Benchmarks
 
-Measured on macOS (Apple M-series), Chrome 147, localhost CDP, 100 Criterion samples.  
-All operations use an already-running Chrome instance (no startup overhead).
+Micro-benchmarks measuring the library's internal message routing overhead are meaningless. Instead, we measure **real-world wall-clock time** for the most common end-to-end tasks.
 
-| Operation | ferrous-browser (median) | Notes |
-|-----------|--------------------------|-------|
-| CDP connect | **~755 µs** | WebSocket handshake to local Chrome |
-| New page/tab | **~756 µs** | `Target.createTarget` + `attachToTarget` |
-| Navigate + content | **~462 µs** | Re-navigate cached page + `outerHTML` |
-| Screenshot (PNG) | **~8–15 ms** | `Page.captureScreenshot` round-trip |
-| JS evaluate | **~0.5–1 ms** | `Runtime.evaluate` + deserialize |
+Measured on macOS (Apple M-series), Chrome 147, using a warm browser instance (to eliminate launch overhead differences).
 
-> **Note:** Navigate times reflect a warm browser navigating to a cached page. First-load times for uncached pages depend on network and page complexity (typically 200 ms–2 s).
+| Operation | ferrous-browser | Puppeteer | chromiumoxide |
+|-----------|-----------------|-----------|---------------|
+| **New Page** (`about:blank`) | ~450 ms | ~75 ms | ~100 ms |
+| **Navigate + Content** (`example.com`, load event) | ~728 ms | ~314 ms | ~277 ms |
+| **Screenshot** (Full page PNG) | ~654 ms | ~138 ms | ~180 ms |
+
+### Performance Notes
+- **Puppeteer & chromiumoxide** use `Target.setAutoAttach` and internal session routing which optimizes new page creation.
+- **ferrous-browser** currently uses explicit `Target.attachToTarget` and captures **full-page screenshots by default**, whereas Puppeteer captures viewport-only.
+- **Goal for v0.2.0**: Close the gap on `new_page` creation time by implementing `Target.setAutoAttach` and session flattening.
 
 ---
 
