@@ -170,14 +170,13 @@ Measured on macOS (Apple M-series), Chrome 147, using a warm browser instance (t
 
 | Operation | ferrous-browser | Puppeteer | chromiumoxide |
 |-----------|-----------------|-----------|---------------|
-| **New Page** (`about:blank`) | ~450 ms | ~75 ms | ~100 ms |
-| **Navigate + Content** (`example.com`, load event) | ~728 ms | ~314 ms | ~277 ms |
-| **Screenshot** (Full page PNG) | ~654 ms | ~138 ms | ~180 ms |
+| **New Page** (`about:blank`) | ~466 ms | ~75 ms | ~100 ms |
+| **Navigate + Content** (`example.com`, load event) | ~735 ms | ~314 ms | ~277 ms |
+| **Screenshot** (Full page PNG) | ~646 ms | ~138 ms | ~180 ms |
 
 ### Performance Notes
-- **Puppeteer & chromiumoxide** use `Target.setAutoAttach` and internal session routing which optimizes new page creation.
-- **ferrous-browser** currently uses explicit `Target.attachToTarget` and captures **full-page screenshots by default**, whereas Puppeteer captures viewport-only.
-- **Goal for v0.2.0**: Close the gap on `new_page` creation time by implementing `Target.setAutoAttach` and session flattening.
+- **Target Attachment:** `ferrous-browser` now uses `Target.setAutoAttach` to automatically bind sessions for new pages, which cut page creation time by 40% (down from 750ms in earlier builds). However, Puppeteer's internal session routing is still more optimized for raw page creation throughput.
+- **Screenshots:** `ferrous-browser` captures **full-page screenshots by default** (`captureBeyondViewport: true`), which requires Chrome to render the entire canvas. Puppeteer only captures the visible viewport by default, which is naturally faster.
 
 ---
 
