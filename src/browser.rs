@@ -227,6 +227,17 @@ impl Browser {
         cdp.set_sink(sink).await;
         let conn = Connection::new(cdp.clone(), stream);
         tokio::spawn(conn.run());
+
+        // Enable auto-attach so new targets connect instantly without round-trip
+        cdp.send_command(
+            "Target.setAutoAttach".to_string(),
+            Some(json!({
+                "autoAttach": true,
+                "waitForDebuggerOnStart": false,
+                "flatten": true
+            })),
+        ).await?;
+
         Ok(Browser {
             cdp,
             pages: Arc::new(RwLock::new(Vec::new())),
@@ -236,6 +247,9 @@ impl Browser {
 
     /// Create a new page/tab in the browser.
     pub async fn new_page(&self) -> Result<Page> {
+        // Subscribe to events BEFORE creating target so we don't miss attachedToTarget
+        let mut event_rx = self.cdp.subscribe_events();
+
         let target_response = self
             .cdp
             .send_command(
@@ -252,21 +266,31 @@ impl Browser {
             ))?
             .to_string();
 
-        let session_response = self
-            .cdp
-            .send_command(
-                "Target.attachToTarget".to_string(),
-                Some(json!({ "targetId": target_id, "flatten": true })),
-            )
-            .await?;
-
-        let session_id = session_response
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| BrowserError::invalid_response(
-                "new_page()", "missing sessionId in Target.attachToTarget response"
-            ))?
-            .to_string();
+        // Wait for the automatic Target.attachedToTarget event for this targetId
+        let session_id = loop {
+            match event_rx.recv().await {
+                Ok(msg) if msg.method.as_deref() == Some("Target.attachedToTarget") => {
+                    if let Some(params) = msg.params {
+                        let msg_target_id = params
+                            .get("targetInfo")
+                            .and_then(|t| t.get("targetId"))
+                            .and_then(|t| t.as_str());
+                        if msg_target_id == Some(&target_id) {
+                            if let Some(sess_id) = params.get("sessionId").and_then(|s| s.as_str()) {
+                                break sess_id.to_string();
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {} // ignore other events
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => {
+                    return Err(BrowserError::invalid_response(
+                        "new_page()", "event channel closed before Target.attachedToTarget"
+                    ));
+                }
+            }
+        };
 
         let page = Page::new(target_id, session_id, self.cdp.clone());
         self.pages.write().await.push(page.clone());
