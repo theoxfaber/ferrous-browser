@@ -165,16 +165,13 @@ impl Browser {
         // Poll until Chrome's HTTP endpoint is ready and fetch the WebSocket URL
         let deadline = tokio::time::Instant::now() + config.timeout;
         let ws_url = loop {
-            match reqwest::get(format!("http://localhost:{port}/json/version")).await {
-                Ok(resp) => {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
-                        {
-                            break url.to_string();
-                        }
+            if let Ok(resp) = reqwest::get(format!("http://localhost:{port}/json/version")).await {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
+                    {
+                        break url.to_string();
                     }
                 }
-                Err(_) => {}
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(BrowserError::BrowserNotLaunched(format!(

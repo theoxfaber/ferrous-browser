@@ -9,31 +9,20 @@ use crate::error::Result;
 
 use futures_util::stream::SplitStream;
 
+/// Type alias for the underlying WebSocket stream to reduce type complexity.
+type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
 /// Manages the WebSocket connection and message routing.
 pub struct Connection {
     cdp: Arc<CDPClient>,
-    stream: Arc<
-        RwLock<
-            Option<
-                SplitStream<
-                    tokio_tungstenite::WebSocketStream<
-                        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-                    >,
-                >,
-            >,
-        >,
-    >,
+    stream: Arc<RwLock<Option<SplitStream<WsStream>>>>,
 }
 
 impl Connection {
     /// Create a new connection
     pub fn new(
         cdp: Arc<CDPClient>,
-        stream: SplitStream<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-        >,
+        stream: SplitStream<WsStream>,
     ) -> Self {
         Connection {
             cdp,
