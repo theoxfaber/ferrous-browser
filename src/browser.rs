@@ -167,8 +167,7 @@ impl Browser {
         let ws_url = loop {
             if let Ok(resp) = reqwest::get(format!("http://localhost:{port}/json/version")).await {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
-                    {
+                    if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
                         break url.to_string();
                     }
                 }
