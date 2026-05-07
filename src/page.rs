@@ -78,25 +78,35 @@ impl Locator {
 
     /// Wait until the element is present with a custom timeout.
     pub async fn wait_for_timeout(&self, dur: Duration) -> Result<()> {
-        self.page.wait_for_selector_with_timeout(&self.selector, dur).await
+        self.page
+            .wait_for_selector_with_timeout(&self.selector, dur)
+            .await
     }
 
     /// Get the inner text of the element.
     pub async fn inner_text(&self) -> Result<String> {
-        let expr = format!("document.querySelector('{}')?.innerText ?? ''", escape_selector(&self.selector));
-        let result = self.page.send_command(
-            "Runtime.evaluate".to_string(),
-            Some(json!({ "expression": expr, "returnByValue": true })),
-        ).await?;
+        let expr = format!(
+            "document.querySelector('{}')?.innerText ?? ''",
+            escape_selector(&self.selector)
+        );
+        let result = self
+            .page
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({ "expression": expr, "returnByValue": true })),
+            )
+            .await?;
         result
             .get("result")
             .and_then(|r| r.get("value"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| BrowserError::invalid_response(
-                format!("inner_text('{}')", self.selector),
-                "unexpected result shape",
-            ))
+            .ok_or_else(|| {
+                BrowserError::invalid_response(
+                    format!("inner_text('{}')", self.selector),
+                    "unexpected result shape",
+                )
+            })
     }
 
     /// Get an attribute value of the element.
@@ -106,13 +116,14 @@ impl Locator {
             escape_selector(&self.selector),
             name,
         );
-        let result = self.page.send_command(
-            "Runtime.evaluate".to_string(),
-            Some(json!({ "expression": expr, "returnByValue": true })),
-        ).await?;
-        let val = result
-            .get("result")
-            .and_then(|r| r.get("value"));
+        let result = self
+            .page
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({ "expression": expr, "returnByValue": true })),
+            )
+            .await?;
+        let val = result.get("result").and_then(|r| r.get("value"));
         match val {
             Some(Value::String(s)) => Ok(Some(s.clone())),
             Some(Value::Null) | None => Ok(None),
@@ -232,10 +243,9 @@ impl Page {
 
         let _ = self.send_command("Page.enable".to_string(), None).await;
 
-        let response = self.send_command(
-            "Page.navigate".to_string(),
-            Some(json!({ "url": url })),
-        ).await?;
+        let response = self
+            .send_command("Page.navigate".to_string(), Some(json!({ "url": url })))
+            .await?;
 
         if let Some(error_text) = response.get("errorText").and_then(|v| v.as_str()) {
             return Err(BrowserError::navigation_failed(&url_owned, error_text));
@@ -288,10 +298,9 @@ impl Page {
         })
         .await;
 
-        wait_result.map_err(|_| BrowserError::timeout(
-            format!("navigating to '{}'", url_owned),
-            TIMEOUT_SECS,
-        ))?
+        wait_result.map_err(|_| {
+            BrowserError::timeout(format!("navigating to '{}'", url_owned), TIMEOUT_SECS)
+        })?
     }
 
     // ─── evaluate ─────────────────────────────────────────────────────────
@@ -314,14 +323,16 @@ impl Page {
     /// # }
     /// ```
     pub async fn evaluate<T: DeserializeOwned>(&self, expression: &str) -> Result<T> {
-        let result = self.send_command(
-            "Runtime.evaluate".to_string(),
-            Some(json!({
-                "expression": expression,
-                "returnByValue": true,
-                "awaitPromise": true,
-            })),
-        ).await?;
+        let result = self
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await?;
 
         if let Some(exc) = result.get("exceptionDetails") {
             let msg = exc
@@ -348,24 +359,28 @@ impl Page {
     ///
     /// Uses a 30-second timeout.
     pub async fn wait_for_selector(&self, selector: &str) -> Result<()> {
-        self.wait_for_selector_with_timeout(selector, Duration::from_secs(30)).await
+        self.wait_for_selector_with_timeout(selector, Duration::from_secs(30))
+            .await
     }
 
     /// Wait for an element matching `selector` with a custom timeout.
-    pub async fn wait_for_selector_with_timeout(&self, selector: &str, dur: Duration) -> Result<()> {
+    pub async fn wait_for_selector_with_timeout(
+        &self,
+        selector: &str,
+        dur: Duration,
+    ) -> Result<()> {
         let selector = selector.to_string();
         let timeout_secs = dur.as_secs();
 
         let fut = async {
             loop {
-                let expr = format!(
-                    "!!document.querySelector('{}')",
-                    escape_selector(&selector),
-                );
-                let result = self.send_command(
-                    "Runtime.evaluate".to_string(),
-                    Some(json!({ "expression": expr, "returnByValue": true })),
-                ).await?;
+                let expr = format!("!!document.querySelector('{}')", escape_selector(&selector),);
+                let result = self
+                    .send_command(
+                        "Runtime.evaluate".to_string(),
+                        Some(json!({ "expression": expr, "returnByValue": true })),
+                    )
+                    .await?;
 
                 if let Some(true) = result
                     .get("result")
@@ -379,10 +394,9 @@ impl Page {
             }
         };
 
-        timeout(dur, fut).await.map_err(|_| BrowserError::timeout(
-            format!("waiting for selector '{}'", selector),
-            timeout_secs,
-        ))?
+        timeout(dur, fut).await.map_err(|_| {
+            BrowserError::timeout(format!("waiting for selector '{}'", selector), timeout_secs)
+        })?
     }
 
     // ─── Interaction helpers (internal, also used by Locator) ─────────────
@@ -396,17 +410,22 @@ impl Page {
         self.send_command(
             "Runtime.evaluate".to_string(),
             Some(json!({ "expression": expr })),
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Type text into an element (internal implementation).
     pub(crate) async fn type_text_selector(&self, selector: &str, text: &str) -> Result<()> {
-        let focus_expr = format!("document.querySelector('{}').focus()", escape_selector(selector));
+        let focus_expr = format!(
+            "document.querySelector('{}').focus()",
+            escape_selector(selector)
+        );
         self.send_command(
             "Runtime.evaluate".to_string(),
             Some(json!({ "expression": focus_expr })),
-        ).await?;
+        )
+        .await?;
 
         for ch in text.chars() {
             self.send_command(
@@ -415,7 +434,8 @@ impl Page {
                     "type": "char",
                     "text": ch.to_string(),
                 })),
-            ).await?;
+            )
+            .await?;
         }
         Ok(())
     }
@@ -455,17 +475,21 @@ impl Page {
     /// # }
     /// ```
     pub async fn content(&self) -> Result<String> {
-        let result = self.send_command(
-            "Runtime.evaluate".to_string(),
-            Some(json!({ "expression": "document.documentElement.outerHTML" })),
-        ).await?;
+        let result = self
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({ "expression": "document.documentElement.outerHTML" })),
+            )
+            .await?;
 
         result
             .get("result")
             .and_then(|v| v.get("value"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| BrowserError::invalid_response("content()", "missing result.value string"))
+            .ok_or_else(|| {
+                BrowserError::invalid_response("content()", "missing result.value string")
+            })
     }
 
     /// Take a screenshot of the page and return PNG bytes.
@@ -485,10 +509,9 @@ impl Page {
     /// # }
     /// ```
     pub async fn screenshot(&self) -> Result<Vec<u8>> {
-        let result = self.send_command(
-            "Page.captureScreenshot".to_string(),
-            None,
-        ).await?;
+        let result = self
+            .send_command("Page.captureScreenshot".to_string(), None)
+            .await?;
 
         let base64_data = result
             .get("data")
@@ -510,10 +533,12 @@ impl Page {
         F: Fn(&str, &str) -> bool + Send + 'static,
     {
         let _ = self.send_command("Network.enable".to_string(), None).await;
-        let _ = self.send_command(
-            "Network.setRequestInterception".to_string(),
-            Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
-        ).await;
+        let _ = self
+            .send_command(
+                "Network.setRequestInterception".to_string(),
+                Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
+            )
+            .await;
 
         // ── P1: Subscribe BEFORE the enable command fires events ─────────────
         let mut event_rx = self.cdp.subscribe_events();
@@ -571,8 +596,14 @@ impl Page {
     // ─── Internal ─────────────────────────────────────────────────────────
 
     /// Send a command to this page's session
-    pub(crate) async fn send_command(&self, method: String, params: Option<Value>) -> Result<Value> {
-        self.cdp.send_command_with_session(&self.session_id, method, params).await
+    pub(crate) async fn send_command(
+        &self,
+        method: String,
+        params: Option<Value>,
+    ) -> Result<Value> {
+        self.cdp
+            .send_command_with_session(&self.session_id, method, params)
+            .await
     }
 }
 
@@ -587,9 +618,9 @@ fn escape_selector(s: &str) -> String {
 fn base64_decode(s: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
-    engine
-        .decode(s)
-        .map_err(|e| BrowserError::invalid_response("screenshot()", format!("base64 decode failed: {e}")))
+    engine.decode(s).map_err(|e| {
+        BrowserError::invalid_response("screenshot()", format!("base64 decode failed: {e}"))
+    })
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
+use futures_util::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
-use futures_util::StreamExt;
 
 use crate::cdp::{CDPClient, CDPMessage};
 use crate::error::Result;
@@ -12,14 +12,28 @@ use futures_util::stream::SplitStream;
 /// Manages the WebSocket connection and message routing.
 pub struct Connection {
     cdp: Arc<CDPClient>,
-    stream: Arc<RwLock<Option<SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>>>,
+    stream: Arc<
+        RwLock<
+            Option<
+                SplitStream<
+                    tokio_tungstenite::WebSocketStream<
+                        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                    >,
+                >,
+            >,
+        >,
+    >,
 }
 
 impl Connection {
     /// Create a new connection
     pub fn new(
         cdp: Arc<CDPClient>,
-        stream: SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+        stream: SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
     ) -> Self {
         Connection {
             cdp,

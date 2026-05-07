@@ -112,8 +112,8 @@ pub mod browser;
 pub mod page;
 
 pub use browser::{Browser, BrowserConfig};
-pub use page::{Locator, Page, WaitUntil};
 pub use error::{BrowserError, ResultExt};
+pub use page::{Locator, Page, WaitUntil};
 
 #[cfg(test)]
 mod tests {
@@ -135,10 +135,7 @@ mod tests {
 
     #[test]
     fn test_error_display_navigation_failed() {
-        let e = BrowserError::navigation_failed(
-            "https://x.com",
-            "net::ERR_NAME_NOT_RESOLVED",
-        );
+        let e = BrowserError::navigation_failed("https://x.com", "net::ERR_NAME_NOT_RESOLVED");
         assert_eq!(
             e.to_string(),
             "Navigation to 'https://x.com' failed: net::ERR_NAME_NOT_RESOLVED"
@@ -147,8 +144,7 @@ mod tests {
 
     #[test]
     fn test_result_context() {
-        let result: crate::error::Result<()> =
-            Err(BrowserError::timeout("connecting", 5));
+        let result: crate::error::Result<()> = Err(BrowserError::timeout("connecting", 5));
         let with_ctx = result.context("Browser::launch_chrome");
         assert!(with_ctx.is_err());
         let msg = with_ctx.unwrap_err().to_string();

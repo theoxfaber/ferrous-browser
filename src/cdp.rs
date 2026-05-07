@@ -1,10 +1,10 @@
+use futures_util::SinkExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, RwLock};
 use tokio::time::{timeout, Duration};
-use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::error::{BrowserError, Result};
@@ -25,12 +25,27 @@ pub struct CDPRequest {
 impl CDPRequest {
     /// Create a new CDP request
     pub fn new(id: u32, method: String, params: Option<Value>) -> Self {
-        Self { id, method, params, session_id: None }
+        Self {
+            id,
+            method,
+            params,
+            session_id: None,
+        }
     }
 
     /// Create a CDP request with session ID
-    pub fn with_session(id: u32, method: String, params: Option<Value>, session_id: String) -> Self {
-        Self { id, method, params, session_id: Some(session_id) }
+    pub fn with_session(
+        id: u32,
+        method: String,
+        params: Option<Value>,
+        session_id: String,
+    ) -> Self {
+        Self {
+            id,
+            method,
+            params,
+            session_id: Some(session_id),
+        }
     }
 
     /// Convert to JSON value for sending
@@ -75,7 +90,10 @@ impl CDPMessage {
     pub fn from_json(value: Value) -> Result<Self> {
         Ok(CDPMessage {
             id: value.get("id").and_then(|v| v.as_u64()).map(|v| v as u32),
-            method: value.get("method").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            method: value
+                .get("method")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             params: value.get("params").cloned(),
             result: value.get("result").cloned(),
             error: value.get("error").cloned(),
@@ -152,7 +170,10 @@ impl CDPClient {
                 .await
                 .map_err(|e| BrowserError::websocket("send_raw", e.to_string()))?;
         } else {
-            return Err(BrowserError::websocket("send_raw", "WebSocket not connected"));
+            return Err(BrowserError::websocket(
+                "send_raw",
+                "WebSocket not connected",
+            ));
         }
         Ok(())
     }
@@ -212,8 +233,7 @@ impl CDPClient {
         params: Option<Value>,
     ) -> Result<Value> {
         let id = self.next_id();
-        let request =
-            CDPRequest::with_session(id, method.clone(), params, session_id.to_string());
+        let request = CDPRequest::with_session(id, method.clone(), params, session_id.to_string());
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();

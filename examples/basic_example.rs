@@ -21,7 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("✓ Created new page");
 
                     // Navigate to example.com
-                    if let Err(e) = page.goto("https://example.com", ferrous_browser::WaitUntil::Load).await {
+                    if let Err(e) = page
+                        .goto("https://example.com", ferrous_browser::WaitUntil::Load)
+                        .await
+                    {
                         eprintln!("Navigation failed: {}", e);
                     } else {
                         println!("✓ Navigated to https://example.com");

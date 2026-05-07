@@ -104,9 +104,9 @@ impl Browser {
     fn free_port() -> Result<u16> {
         TcpListener::bind("127.0.0.1:0")
             .map(|l| l.local_addr().unwrap().port())
-            .map_err(|e| BrowserError::BrowserNotLaunched(
-                format!("Could not find a free port: {e}")
-            ))
+            .map_err(|e| {
+                BrowserError::BrowserNotLaunched(format!("Could not find a free port: {e}"))
+            })
     }
 
     /// Launch Chrome/Chromium and connect to it automatically.
@@ -154,9 +154,11 @@ impl Browser {
         let child = Command::new(&chrome_path)
             .args(&chrome_args)
             .spawn()
-            .map_err(|e| BrowserError::BrowserNotLaunched(
-                format!("Failed to spawn Chrome at '{chrome_path}': {e}")
-            ))?;
+            .map_err(|e| {
+                BrowserError::BrowserNotLaunched(format!(
+                    "Failed to spawn Chrome at '{chrome_path}': {e}"
+                ))
+            })?;
 
         let pid = Pid::from_raw(child.id() as i32);
 
@@ -166,7 +168,8 @@ impl Browser {
             match reqwest::get(format!("http://localhost:{port}/json/version")).await {
                 Ok(resp) => {
                     if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
+                        if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str())
+                        {
                             break url.to_string();
                         }
                     }
@@ -236,7 +239,8 @@ impl Browser {
                 "waitForDebuggerOnStart": false,
                 "flatten": true
             })),
-        ).await?;
+        )
+        .await?;
 
         Ok(Browser {
             cdp,
@@ -261,9 +265,12 @@ impl Browser {
         let target_id = target_response
             .get("targetId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| BrowserError::invalid_response(
-                "new_page()", "missing targetId in Target.createTarget response"
-            ))?
+            .ok_or_else(|| {
+                BrowserError::invalid_response(
+                    "new_page()",
+                    "missing targetId in Target.createTarget response",
+                )
+            })?
             .to_string();
 
         // Wait for the automatic Target.attachedToTarget event for this targetId
@@ -276,7 +283,8 @@ impl Browser {
                             .and_then(|t| t.get("targetId"))
                             .and_then(|t| t.as_str());
                         if msg_target_id == Some(&target_id) {
-                            if let Some(sess_id) = params.get("sessionId").and_then(|s| s.as_str()) {
+                            if let Some(sess_id) = params.get("sessionId").and_then(|s| s.as_str())
+                            {
                                 break sess_id.to_string();
                             }
                         }
@@ -286,7 +294,8 @@ impl Browser {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => {
                     return Err(BrowserError::invalid_response(
-                        "new_page()", "event channel closed before Target.attachedToTarget"
+                        "new_page()",
+                        "event channel closed before Target.attachedToTarget",
                     ));
                 }
             }
