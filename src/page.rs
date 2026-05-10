@@ -392,10 +392,7 @@ impl Page {
                 .and_then(|e| e.get("description"))
                 .and_then(|d| d.as_str())
                 .unwrap_or("unknown JS exception");
-            return Err(BrowserError::command_failed(
-                "Runtime.evaluate",
-                msg,
-            ));
+            return Err(BrowserError::command_failed("Runtime.evaluate", msg));
         }
 
         result
@@ -730,9 +727,7 @@ impl Page {
         let cookies_array = result
             .get("cookies")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                BrowserError::invalid_response("cookies()", "missing cookies array")
-            })?;
+            .ok_or_else(|| BrowserError::invalid_response("cookies()", "missing cookies array"))?;
 
         let mut cookies = Vec::new();
         for cookie_val in cookies_array {
