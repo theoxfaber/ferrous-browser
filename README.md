@@ -264,9 +264,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Roadmap
 
-- [ ] `page.set_cookies()` / `page.cookies()` — session persistence
-- [ ] `page.pdf()` — PDF export
-- [ ] `page.evaluate_handle()` — remote object references
+- [x] `page.set_cookies()` / `page.cookies()` — session persistence
+- [x] `page.pdf()` — PDF export
+- [x] `page.evaluate_handle()` — remote object references
 - [ ] Structured trace/HAR capture
 - [ ] CI matrix: Linux + macOS + Windows / stable + beta Chrome
 - [ ] Cross-platform: replace `nix` for Windows support
