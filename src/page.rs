@@ -1,4 +1,5 @@
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
@@ -21,6 +22,54 @@ pub enum WaitUntil {
     /// Wait until there are no in-flight network requests for 500 ms.
     /// Useful for SPAs that fetch data after the load event.
     NetworkIdle,
+}
+
+// ─── P2B: Cookie ─────────────────────────────────────────────────────────────
+
+/// Represents a browser cookie for session persistence.
+///
+/// # Example
+///
+/// ```no_run
+/// # use ferrous_browser::{Browser, Cookie, WaitUntil};
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let browser = Browser::launch().await?;
+/// let page = browser.new_page().await?;
+/// let cookies = vec![Cookie {
+///     name: "session".to_string(),
+///     value: "abc123".to_string(),
+///     ..Default::default()
+/// }];
+/// page.set_cookies(&cookies).await?;
+/// let retrieved = page.cookies().await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Cookie {
+    /// Cookie name
+    pub name: String,
+    /// Cookie value
+    pub value: String,
+    /// Cookie domain (default: page domain)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Cookie path (default: "/")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Seconds since epoch when cookie expires (default: session cookie)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires: Option<f64>,
+    /// HTTPS only flag
+    #[serde(default)]
+    pub secure: bool,
+    /// HTTP only flag (not accessible via JavaScript)
+    #[serde(default, rename = "httpOnly")]
+    pub http_only: bool,
+    /// SameSite attribute ("Strict", "Lax", "None")
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sameSite")]
+    pub same_site: Option<String>,
 }
 
 // ─── P3: Locator ─────────────────────────────────────────────────────────────
@@ -304,6 +353,63 @@ impl Page {
     }
 
     // ─── evaluate ─────────────────────────────────────────────────────────
+
+    /// Evaluate a JavaScript expression and return a remote object handle.
+    ///
+    /// This is useful when you need a reference to a JavaScript object without
+    /// serializing it back to Rust. The returned handle is valid only for this
+    /// session and should be disposed of when no longer needed.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrous_browser::{Browser, WaitUntil};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let browser = Browser::launch_chrome(None).await?;
+    /// let page = browser.new_page().await?;
+    /// page.goto("https://example.com", WaitUntil::Load).await?;
+    /// // Get a remote reference to an object
+    /// let handle = page.evaluate_handle("document.body").await?;
+    /// println!("Remote object handle: {}", handle);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn evaluate_handle(&self, expression: &str) -> Result<String> {
+        let result = self
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({
+                    "expression": expression,
+                    "returnByValue": false
+                })),
+            )
+            .await?;
+
+        if let Some(exc) = result.get("exceptionDetails") {
+            let msg = exc
+                .get("exception")
+                .and_then(|e| e.get("description"))
+                .and_then(|d| d.as_str())
+                .unwrap_or("unknown JS exception");
+            return Err(BrowserError::command_failed(
+                "Runtime.evaluate",
+                msg,
+            ));
+        }
+
+        result
+            .get("result")
+            .and_then(|v| v.get("objectId"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                BrowserError::invalid_response(
+                    "evaluate_handle()",
+                    "missing result.objectId — may have evaluated to a primitive",
+                )
+            })
+    }
 
     /// Evaluate a JavaScript expression in the page context and deserialize the
     /// result as `T`.
@@ -591,6 +697,202 @@ impl Page {
         });
 
         Ok(())
+    }
+
+    // ─── Session persistence ────────────────────────────────────────────────
+
+    /// Get all cookies from the page.
+    ///
+    /// Retrieves all cookies visible to the current page, including
+    /// expired cookies if they are still in the cookie jar.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrous_browser::{Browser, WaitUntil};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let browser = Browser::launch().await?;
+    /// let page = browser.new_page().await?;
+    /// page.goto("https://example.com", WaitUntil::Load).await?;
+    /// let cookies = page.cookies().await?;
+    /// for cookie in cookies {
+    ///     println!("{}={}", cookie.name, cookie.value);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn cookies(&self) -> Result<Vec<Cookie>> {
+        let result = self
+            .send_command("Network.getCookies".to_string(), None)
+            .await?;
+
+        let cookies_array = result
+            .get("cookies")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                BrowserError::invalid_response("cookies()", "missing cookies array")
+            })?;
+
+        let mut cookies = Vec::new();
+        for cookie_val in cookies_array {
+            if let Ok(cookie) = serde_json::from_value::<Cookie>(cookie_val.clone()) {
+                cookies.push(cookie);
+            }
+        }
+
+        Ok(cookies)
+    }
+
+    /// Set cookies for the page (session persistence).
+    ///
+    /// Sets one or more cookies that will be visible to JavaScript and HTTP requests.
+    /// Typically called before navigation to pre-populate cookies for authentication.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrous_browser::{Browser, Cookie, WaitUntil};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let browser = Browser::launch().await?;
+    /// let page = browser.new_page().await?;
+    /// let cookies = vec![Cookie {
+    ///     name: "session_id".to_string(),
+    ///     value: "abc123xyz".to_string(),
+    ///     domain: Some("example.com".to_string()),
+    ///     ..Default::default()
+    /// }];
+    /// page.set_cookies(&cookies).await?;
+    /// page.goto("https://example.com", WaitUntil::Load).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_cookies(&self, cookies: &[Cookie]) -> Result<()> {
+        // Convert cookies to JSON array with proper formatting for CDP
+        let cookie_params: Vec<Value> = cookies
+            .iter()
+            .map(|c| {
+                let mut obj = json!({
+                    "name": c.name,
+                    "value": c.value,
+                });
+                if let Some(domain) = &c.domain {
+                    obj["domain"] = json!(domain);
+                }
+                if let Some(path) = &c.path {
+                    obj["path"] = json!(path);
+                }
+                if let Some(expires) = c.expires {
+                    obj["expires"] = json!(expires);
+                }
+                if c.secure {
+                    obj["secure"] = json!(true);
+                }
+                if c.http_only {
+                    obj["httpOnly"] = json!(true);
+                }
+                if let Some(same_site) = &c.same_site {
+                    obj["sameSite"] = json!(same_site);
+                }
+                obj
+            })
+            .collect();
+
+        self.send_command(
+            "Network.setCookies".to_string(),
+            Some(json!({ "cookies": cookie_params })),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    // ─── PDF Export ──────────────────────────────────────────────────────────
+
+    /// Export the page as PDF and return the bytes.
+    ///
+    /// Converts the current page to PDF format. By default, includes all pages
+    /// and uses A4 paper size in portrait mode.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrous_browser::{Browser, WaitUntil};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let browser = Browser::launch().await?;
+    /// let page = browser.new_page().await?;
+    /// page.goto("https://example.com", WaitUntil::Load).await?;
+    /// let pdf = page.pdf().await?;
+    /// std::fs::write("page.pdf", pdf)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn pdf(&self) -> Result<Vec<u8>> {
+        self.pdf_with_options(None).await
+    }
+
+    /// Export the page as PDF with custom options.
+    ///
+    /// Allows control over paper size, margins, scale, landscape mode, and more.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrous_browser::{Browser, WaitUntil};
+    /// # use serde_json::json;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let browser = Browser::launch().await?;
+    /// let page = browser.new_page().await?;
+    /// page.goto("https://example.com", WaitUntil::Load).await?;
+    /// let options = json!({
+    ///     "landscape": true,
+    ///     "scale": 1.5,
+    ///     "paperWidth": 11.0,
+    ///     "paperHeight": 8.5,
+    /// });
+    /// let pdf = page.pdf_with_options(Some(&options)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn pdf_with_options(&self, options: Option<&Value>) -> Result<Vec<u8>> {
+        let mut params = json!({
+            "landscape": false,
+            "displayHeaderFooter": false,
+            "scale": 1.0,
+            "paperWidth": 8.5,
+            "paperHeight": 11.0,
+            "marginTop": 0.4,
+            "marginBottom": 0.4,
+            "marginLeft": 0.4,
+            "marginRight": 0.4,
+            "preferCSSPageSize": true,
+            "transferMode": "ReturnAsBase64",
+        });
+
+        // Merge with provided options
+        if let Some(opts) = options {
+            if let Some(obj) = params.as_object_mut() {
+                if let Some(opts_obj) = opts.as_object() {
+                    for (key, value) in opts_obj.iter() {
+                        obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+
+        let result = self
+            .send_command("Page.printToPDF".to_string(), Some(params))
+            .await?;
+
+        let base64_data = result
+            .get("data")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| BrowserError::invalid_response("pdf()", "missing data field"))?;
+
+        base64_decode(base64_data)
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────

@@ -113,7 +113,7 @@ pub mod page;
 
 pub use browser::{Browser, BrowserConfig};
 pub use error::{BrowserError, ResultExt};
-pub use page::{Locator, Page, WaitUntil};
+pub use page::{Cookie, Locator, Page, WaitUntil};
 
 #[cfg(test)]
 mod tests {
