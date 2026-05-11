@@ -321,9 +321,9 @@ impl Page {
         let mut event_rx = self.cdp.subscribe_events();
         // ─────────────────────────────────────────────────────────────────────
 
-        // First goto on this Page also enables Page domain events. All
+        // First goto on this page also enables Page domain events. All
         // concurrent gotos on the same Page cooperate via OnceCell rather
-        // than each sending their own redundant Page.enable.
+        // than each sending their own Page.enable.
         self.ensure_page_enabled().await;
 
         let response = self
@@ -502,39 +502,70 @@ impl Page {
     }
 
     /// Wait for an element matching `selector` with a custom timeout.
+    ///
+    /// Implementation note: we push the *entire* wait into Chrome with a
+    /// MutationObserver-backed Promise and use `Runtime.evaluate`'s
+    /// `awaitPromise: true` so Chrome holds the response until the element
+    /// appears (or the timer fires). Net result is one CDP round-trip per
+    /// call and a reaction latency bounded by the DOM mutation that
+    /// inserted the element, not by a polling interval.
     pub async fn wait_for_selector_with_timeout(
         &self,
         selector: &str,
         dur: Duration,
     ) -> Result<()> {
-        let selector = selector.to_string();
-        let timeout_secs = dur.as_secs();
+        let timeout_ms = dur.as_millis() as u64;
+        // The selector is interpolated into a JS string literal, so escape
+        // anything that would break out of it. serde_json::to_string gives
+        // us a properly-quoted JS string for free.
+        let selector_lit = serde_json::to_string(selector).expect("selector is valid utf-8");
 
-        let fut = async {
-            loop {
-                let expr = format!("!!document.querySelector('{}')", escape_selector(&selector),);
-                let result = self
-                    .send_command(
-                        "Runtime.evaluate".to_string(),
-                        Some(json!({ "expression": expr, "returnByValue": true })),
-                    )
-                    .await?;
+        let expr = format!(
+            r#"new Promise((resolve) => {{
+                const sel = {selector_lit};
+                if (document.querySelector(sel)) {{ resolve(true); return; }}
+                const observer = new MutationObserver(() => {{
+                    if (document.querySelector(sel)) {{
+                        observer.disconnect();
+                        clearTimeout(timer);
+                        resolve(true);
+                    }}
+                }});
+                const timer = setTimeout(() => {{
+                    observer.disconnect();
+                    resolve(false);
+                }}, {timeout_ms});
+                observer.observe(document, {{
+                    childList: true, subtree: true, attributes: true
+                }});
+            }})"#
+        );
 
-                if let Some(true) = result
-                    .get("result")
-                    .and_then(|r| r.get("value"))
-                    .and_then(|v| v.as_bool())
-                {
-                    return Ok::<(), BrowserError>(());
-                }
+        let result = self
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({
+                    "expression": expr,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await?;
 
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        };
+        let appeared = result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        timeout(dur, fut).await.map_err(|_| {
-            BrowserError::timeout(format!("waiting for selector '{}'", selector), timeout_secs)
-        })?
+        if appeared {
+            Ok(())
+        } else {
+            Err(BrowserError::timeout(
+                format!("waiting for selector '{selector}'"),
+                dur.as_secs(),
+            ))
+        }
     }
 
     // ─── Interaction helpers (internal, also used by Locator) ─────────────

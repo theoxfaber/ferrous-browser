@@ -55,3 +55,11 @@ path = "src/lib.rs"
 [[example]]
 name = "launch_bench"
 path = "examples/launch_bench.rs"
+
+[[example]]
+name = "goto_bench"
+path = "examples/goto_bench.rs"
+
+[[example]]
+name = "wait_bench"
+path = "examples/wait_bench.rs"
