@@ -214,6 +214,11 @@ pub struct Page {
     pub session_id: String,
     /// Reference to CDP client
     cdp: Arc<CDPClient>,
+    /// Lazily-enabled Page domain: the first `goto` (or anything else that
+    /// needs Page events) drives the one-time `Page.enable` round-trip; any
+    /// concurrent callers wait on it; subsequent callers see it already
+    /// resolved and pay nothing. Clones of a `Page` share this state via Arc.
+    page_enabled: Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl Page {
@@ -224,7 +229,31 @@ impl Page {
             target_id,
             session_id,
             cdp,
+            page_enabled: Arc::new(tokio::sync::OnceCell::new()),
         }
+    }
+
+    /// Ensure the Page domain is enabled on this session. Cheap on every
+    /// call after the first: once `get_or_init` resolves, subsequent calls
+    /// return synchronously from the OnceCell without locking or awaiting.
+    ///
+    /// `Page.enable` only needs to fire once per session (the events it
+    /// unlocks are sticky), so cache completion in a OnceCell. Concurrent
+    /// first-callers cooperate; later callers pay nothing.
+    async fn ensure_page_enabled(&self) {
+        let cdp = self.cdp.clone();
+        let sid = self.session_id.clone();
+        self.page_enabled
+            .get_or_init(|| async move {
+                // Swallow the error: a failed Page.enable surfaces later as a
+                // clearer navigation timeout, and turning a transient Chrome
+                // hiccup at session init into a permanent failure for this
+                // Page is worse than a deferred error.
+                let _ = cdp
+                    .send_command_with_session(&sid, "Page.enable".to_string(), None)
+                    .await;
+            })
+            .await;
     }
 
     // ─── P3: Locator entry point ──────────────────────────────────────────
@@ -292,7 +321,10 @@ impl Page {
         let mut event_rx = self.cdp.subscribe_events();
         // ─────────────────────────────────────────────────────────────────────
 
-        let _ = self.send_command("Page.enable".to_string(), None).await;
+        // First goto on this Page also enables Page domain events. All
+        // concurrent gotos on the same Page cooperate via OnceCell rather
+        // than each sending their own redundant Page.enable.
+        self.ensure_page_enabled().await;
 
         let response = self
             .send_command("Page.navigate".to_string(), Some(json!({ "url": url })))
