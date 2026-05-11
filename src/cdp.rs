@@ -289,6 +289,24 @@ impl CDPClient {
         pending.insert(id, tx);
     }
 
+    /// Drop every pending response sender. Any `send_command` currently
+    /// awaiting one of these will see its oneshot close immediately and
+    /// return `BrowserError::command_failed("…", "response channel closed…")`,
+    /// instead of waiting out the 30-second timeout. Call this when the
+    /// underlying WebSocket dies.
+    pub async fn fail_all_pending(&self, reason: &str) {
+        let mut pending = self.pending_responses.write().await;
+        let count = pending.len();
+        pending.clear(); // dropping the senders signals the receivers
+        if count > 0 {
+            tracing::warn!(
+                pending_count = count,
+                reason = reason,
+                "WebSocket terminated; failing in-flight CDP requests"
+            );
+        }
+    }
+
     /// Handle an incoming CDP message — called by `Connection`
     #[tracing::instrument(level = "debug", skip_all, fields(method = ?msg.method, id = ?msg.id))]
     pub async fn handle_message(&self, msg: CDPMessage) -> Result<()> {
