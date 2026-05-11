@@ -51,3 +51,7 @@ path = "examples/profile_run.rs"
 [lib]
 name = "ferrous_browser"
 path = "src/lib.rs"
+
+[[example]]
+name = "launch_bench"
+path = "examples/launch_bench.rs"
