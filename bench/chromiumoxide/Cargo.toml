@@ -1,0 +1,13 @@
+[package]
+name = "chromiumoxide_bench"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+[[bin]]
+name = "bench"
+path = "src/bench.rs"

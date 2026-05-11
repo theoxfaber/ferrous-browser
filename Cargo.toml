@@ -63,3 +63,7 @@ path = "examples/goto_bench.rs"
 [[example]]
 name = "wait_bench"
 path = "examples/wait_bench.rs"
+
+[[example]]
+name = "parity_bench"
+path = "examples/parity_bench.rs"

@@ -1,0 +1,6 @@
+{
+  "name": "ferrous-bench-puppeteer",
+  "private": true,
+  "description": "Apples-to-apples bench harness for puppeteer; see ../README.md",
+  "dependencies": { "puppeteer": "^23.0.0" }
+}
