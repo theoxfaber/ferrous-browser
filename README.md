@@ -181,9 +181,10 @@ Apples-to-apples, **same Chrome binary** (Chrome for Testing 131.0.6778.204), sa
 
 ### What this actually tells you
 
-- **Screenshot** is Chrome's own work; every library lands at exactly 50 ms. Library overhead here is rounding error.
-- **`goto`** to `about:blank` is also dominated by Chrome (11–15 ms across the board). Real navigation is dominated by the network, not the library.
-- **`new_page`** is where library design starts to show: ferrous-browser uses `Target.setAutoAttach` so a new tab's session is bound without a second roundtrip. Puppeteer / Playwright enable many CDP domains on every new page; we lazy-enable just `Page` (and only once).
+- **`launch_chrome`** is roughly even with Puppeteer and slower than Playwright (176 ms). Playwright's edge here is worth investigating; for now we read Chrome's `DevTools listening on ws://...` line off stderr instead of polling the `/json/version` HTTP endpoint, which removes a 200 ms backoff loop and the HTTP retry budget.
+- **`new_page`** is where library design starts to show. ferrous-browser uses `Target.setAutoAttach` so a new tab's session is bound without a second roundtrip, and lazy-enables the `Page` domain exactly once per session rather than on every `goto` (saves one CDP round-trip per navigation; the win scales with RTT).
+- **`goto`** to `about:blank` is dominated by Chrome (11–15 ms across the board). Real navigation is dominated by the network, not the library.
+- **`screenshot`** is Chrome's own work; every library lands at exactly 50 ms. All four default to viewport-only PNG capture, which is why they cluster. Library overhead here is rounding error.
 - **`evaluate`** is roughly 5x faster than the Node-based libraries because we don't pay the Node-to-Chrome IPC hop on top of Chrome's own latency; we're a single process talking straight to Chrome.
 - **`wait_for_selector` reaction gap** is the biggest gap, and it's the one users notice on every test. ferrous-browser pushes the wait into the page itself via a MutationObserver-backed Promise that Chrome holds open until the selector matches, so reaction latency is bounded by one CDP round-trip rather than by anyone's poll interval.
 
@@ -202,11 +203,15 @@ Playwright        median 26.3 ms  max ~35  ms    ← internal polling, ~25 ms ca
 
 So on a test that does 100 `waitFor`s, ferrous-browser saves roughly **2.5 seconds vs Playwright** and **1.6 seconds vs chromiumoxide** purely from lower reaction latency, with no change in your code.
 
-### Performance notes
+### Earlier benchmarks (macOS, Chrome 147)
 
-- **Cold launch.** Chrome announces its DevTools WebSocket on stderr the moment it's ready (`DevTools listening on ws://...`). We parse that line directly instead of polling `http://localhost:<port>/json/version`, so there's no HTTP retry budget, no JSON decode, and no 200 ms backoff sleeps.
-- **Page domain enable.** Page domain events are sticky in Chrome; we enable them once per session at page creation, not on every `goto`. Saves one CDP round-trip per navigation, which scales with RTT: invisible on a local socket, noticeable over a network.
-- **Screenshots.** All four libraries default to viewport-only PNG capture, which is why they cluster at 50 ms. If you need full-page screenshots, that's an option flag in every library and Chrome itself sets the floor; pick the library you want for the other reasons, not for this.
+Kept for continuity; these numbers used a different rig (macOS Apple Silicon, system-installed Chrome 147) and a smaller library set, so they are **not directly comparable** to the Linux/CfT table above.
+
+| Operation | ferrous-browser | Puppeteer | chromiumoxide |
+|-----------|-----------------|-----------|---------------|
+| **New Page** (`about:blank`) | ~466 ms | ~75 ms | ~100 ms |
+| **Navigate + Content** (`example.com`, load event) | ~735 ms | ~314 ms | ~277 ms |
+| **Screenshot** (Full page PNG) | ~646 ms | ~138 ms | ~180 ms |
 
 ---
 
