@@ -1,12 +1,12 @@
 use futures_util::SinkExt;
 use serde_json::{json, Value};
-use tracing::Instrument;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot, RwLock};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::Message;
+use tracing::Instrument;
 
 use crate::error::{BrowserError, Result};
 
@@ -113,15 +113,28 @@ pub type WebSocketSink = futures_util::stream::SplitSink<
     Message,
 >;
 
-/// Core CDP client that manages WebSocket connection and message routing
+/// Core CDP client that manages WebSocket connection and message routing.
+///
+/// **Concurrency model:**
+/// - Outgoing writes go through an unbounded mpsc channel feeding a dedicated
+///   writer task (`spawn_writer_task`). Many callers can send concurrently
+///   without contending on a lock.
+/// - Incoming reads are dispatched by `Connection::run` calling
+///   `handle_message`, which only briefly holds a sync mutex on
+///   `pending_responses`, with no awaits while the lock is held.
 pub struct CDPClient {
     ws_url: String,
     message_id_counter: Arc<AtomicU32>,
-    pending_responses: Arc<RwLock<HashMap<u32, oneshot::Sender<Value>>>>,
-    /// Broadcast channel carrying ALL CDP events (method is_some()).
+    /// Pending command responses, keyed by request id. Guarded by a *sync*
+    /// mutex; we never `.await` while holding it, so a `std::sync::Mutex`
+    /// is correct and skips `tokio::sync::RwLock`'s wait-queue overhead.
+    pending_responses: Arc<StdMutex<HashMap<u32, oneshot::Sender<Value>>>>,
+    /// Broadcast channel carrying ALL CDP events (`method.is_some()`).
     /// Subscribers filter by method name and session_id themselves.
     event_broadcast: broadcast::Sender<CDPMessage>,
-    ws_sink: Arc<RwLock<Option<WebSocketSink>>>,
+    /// Sender side of the writer-task mailbox. `None` until `set_writer` is
+    /// called from `Browser::connect_internal`.
+    ws_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Message>>>>,
 }
 
 impl CDPClient {
@@ -131,16 +144,16 @@ impl CDPClient {
         Self {
             ws_url,
             message_id_counter: Arc::new(AtomicU32::new(1)),
-            pending_responses: Arc::new(RwLock::new(HashMap::new())),
+            pending_responses: Arc::new(StdMutex::new(HashMap::new())),
             event_broadcast,
-            ws_sink: Arc::new(RwLock::new(None)),
+            ws_tx: Arc::new(StdMutex::new(None)),
         }
     }
 
-    /// Set the WebSocket sink (called from Connection)
-    pub async fn set_sink(&self, sink: WebSocketSink) {
-        let mut ws = self.ws_sink.write().await;
-        *ws = Some(sink);
+    /// Install the writer-task mailbox. Called once by
+    /// `Browser::connect_internal` right after the writer task is spawned.
+    pub fn set_writer(&self, tx: mpsc::UnboundedSender<Message>) {
+        *self.ws_tx.lock().expect("ws_tx mutex poisoned") = Some(tx);
     }
 
     /// Generate the next message ID
@@ -163,26 +176,16 @@ impl CDPClient {
         Ok(ws_stream)
     }
 
-    /// Send raw message through WebSocket
-    #[tracing::instrument(level = "debug", skip_all, fields(bytes = msg.len()))]
-    pub async fn send_raw(&self, msg: String) -> Result<()> {
-        let mut ws = self
-            .ws_sink
-            .write()
-            .instrument(tracing::info_span!("sink_lock"))
-            .await;
-        if let Some(sink) = ws.as_mut() {
-            sink.send(Message::Text(msg))
-                .instrument(tracing::info_span!("ws_write"))
-                .await
-                .map_err(|e| BrowserError::websocket("send_raw", e.to_string()))?;
-        } else {
-            return Err(BrowserError::websocket(
-                "send_raw",
-                "WebSocket not connected",
-            ));
-        }
-        Ok(())
+    /// Send raw message through the writer task. Synchronous and (modulo one
+    /// brief sync-mutex acquire) lock-free, because the mpsc channel fan-in
+    /// is the contention point now, not a per-call lock.
+    pub fn send_raw(&self, msg: String) -> Result<()> {
+        let tx_guard = self.ws_tx.lock().expect("ws_tx mutex poisoned");
+        let tx = tx_guard.as_ref().ok_or_else(|| {
+            BrowserError::websocket("send_raw", "WebSocket writer not initialised")
+        })?;
+        tx.send(Message::Text(msg))
+            .map_err(|_| BrowserError::websocket("send_raw", "WebSocket writer task ended"))
     }
 
     /// Subscribe to all CDP events (unfiltered broadcast receiver).
@@ -209,12 +212,10 @@ impl CDPClient {
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
-        self.register_response_handler(id, tx).await;
+        self.register_response_handler(id, tx);
         let json_str = tracing::info_span!("serialize").in_scope(|| request.to_json().to_string());
         let bytes = json_str.len();
-        self.send_raw(json_str)
-            .instrument(tracing::info_span!("ws_send", bytes))
-            .await?;
+        tracing::info_span!("ws_send", bytes).in_scope(|| self.send_raw(json_str))?;
         // ─────────────────────────────────────────────────────────────────────
 
         const TIMEOUT_SECS: u64 = 30;
@@ -226,8 +227,10 @@ impl CDPClient {
                     "response channel closed unexpectedly",
                 )),
                 Err(_) => {
-                    let mut pending = self.pending_responses.write().await;
-                    pending.remove(&id);
+                    self.pending_responses
+                        .lock()
+                        .expect("pending_responses mutex poisoned")
+                        .remove(&id);
                     Err(BrowserError::timeout(
                         format!("waiting for response to '{method}'"),
                         TIMEOUT_SECS,
@@ -254,12 +257,10 @@ impl CDPClient {
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
-        self.register_response_handler(id, tx).await;
+        self.register_response_handler(id, tx);
         let json_str = tracing::info_span!("serialize").in_scope(|| request.to_json().to_string());
         let bytes = json_str.len();
-        self.send_raw(json_str)
-            .instrument(tracing::info_span!("ws_send", bytes))
-            .await?;
+        tracing::info_span!("ws_send", bytes).in_scope(|| self.send_raw(json_str))?;
         // ─────────────────────────────────────────────────────────────────────
 
         const TIMEOUT_SECS: u64 = 30;
@@ -271,8 +272,10 @@ impl CDPClient {
                     "response channel closed unexpectedly",
                 )),
                 Err(_) => {
-                    let mut pending = self.pending_responses.write().await;
-                    pending.remove(&id);
+                    self.pending_responses
+                        .lock()
+                        .expect("pending_responses mutex poisoned")
+                        .remove(&id);
                     Err(BrowserError::timeout(
                         format!("waiting for response to '{method}'"),
                         TIMEOUT_SECS,
@@ -283,10 +286,13 @@ impl CDPClient {
         wait.instrument(tracing::info_span!("await_response")).await
     }
 
-    /// Register a pending response handler
-    pub async fn register_response_handler(&self, id: u32, tx: oneshot::Sender<Value>) {
-        let mut pending = self.pending_responses.write().await;
-        pending.insert(id, tx);
+    /// Register a pending response handler. Synchronous: the sync mutex
+    /// only protects the HashMap insert.
+    pub fn register_response_handler(&self, id: u32, tx: oneshot::Sender<Value>) {
+        self.pending_responses
+            .lock()
+            .expect("pending_responses mutex poisoned")
+            .insert(id, tx);
     }
 
     /// Drop every pending response sender. Any `send_command` currently
@@ -294,10 +300,14 @@ impl CDPClient {
     /// return `BrowserError::command_failed("…", "response channel closed…")`,
     /// instead of waiting out the 30-second timeout. Call this when the
     /// underlying WebSocket dies.
-    pub async fn fail_all_pending(&self, reason: &str) {
-        let mut pending = self.pending_responses.write().await;
+    pub fn fail_all_pending(&self, reason: &str) {
+        let mut pending = self
+            .pending_responses
+            .lock()
+            .expect("pending_responses mutex poisoned");
         let count = pending.len();
         pending.clear(); // dropping the senders signals the receivers
+        drop(pending);
         if count > 0 {
             tracing::warn!(
                 pending_count = count,
@@ -307,17 +317,19 @@ impl CDPClient {
         }
     }
 
-    /// Handle an incoming CDP message — called by `Connection`
+    /// Handle an incoming CDP message; called by `Connection::run`.
+    /// Synchronous: no `.await` happens while the pending-responses mutex
+    /// is held.
     #[tracing::instrument(level = "debug", skip_all, fields(method = ?msg.method, id = ?msg.id))]
-    pub async fn handle_message(&self, msg: CDPMessage) -> Result<()> {
+    pub fn handle_message(&self, msg: CDPMessage) -> Result<()> {
         if let Some(id) = msg.id {
             // It's a response to one of our commands
-            let mut pending = self
+            let tx = self
                 .pending_responses
-                .write()
-                .instrument(tracing::info_span!("pending_lock_write"))
-                .await;
-            if let Some(tx) = pending.remove(&id) {
+                .lock()
+                .expect("pending_responses mutex poisoned")
+                .remove(&id);
+            if let Some(tx) = tx {
                 if let Some(error) = msg.error {
                     let _ = tx.send(json!({ "error": error }));
                 } else if let Some(result) = msg.result {
@@ -331,9 +343,30 @@ impl CDPClient {
             // Subscribers filter by method + session_id.
             let _ = self.event_broadcast.send(msg);
         }
-
         Ok(())
     }
+}
+
+/// Spawn the dedicated writer task that drains the mpsc and writes to the
+/// WebSocket sink. The task ends when the channel closes (all senders
+/// dropped) or when a write fails. On a write failure it also fails every
+/// in-flight CDP request via `fail_all_pending` so callers see an immediate
+/// error instead of the 30 s timeout.
+pub fn spawn_writer_task(
+    mut sink: WebSocketSink,
+    mut rx: mpsc::UnboundedReceiver<Message>,
+    cdp: Arc<CDPClient>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let Err(e) = sink.send(msg).await {
+                tracing::error!(error = %e, "WebSocket write error; terminating writer");
+                cdp.fail_all_pending(&format!("write error: {e}"));
+                return;
+            }
+        }
+        tracing::debug!("WebSocket writer task exiting (channel closed)");
+    })
 }
 
 #[cfg(test)]

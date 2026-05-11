@@ -50,7 +50,7 @@ impl Connection {
                     match serde_json::from_str::<Value>(&text) {
                         Ok(value) => match CDPMessage::from_json(value) {
                             Ok(msg) => {
-                                if let Err(e) = self.cdp.handle_message(msg).await {
+                                if let Err(e) = self.cdp.handle_message(msg) {
                                     tracing::warn!(error = %e, "handle_message failed");
                                 }
                             }
@@ -82,7 +82,7 @@ impl Connection {
 
         // Wake every in-flight `send_command` with a clean failure rather
         // than letting each one time out individually.
-        self.cdp.fail_all_pending(&termination_reason).await;
+        self.cdp.fail_all_pending(&termination_reason);
         Ok(())
     }
 }

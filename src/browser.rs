@@ -1,4 +1,4 @@
-use crate::cdp::CDPClient;
+use crate::cdp::{spawn_writer_task, CDPClient};
 use crate::connection::Connection;
 use crate::error::{BrowserError, Result};
 use crate::page::Page;
@@ -265,7 +265,11 @@ impl Browser {
         let cdp = Arc::new(CDPClient::new(ws_url));
         let ws_stream = cdp.connect().await?;
         let (sink, stream) = ws_stream.split();
-        cdp.set_sink(sink).await;
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        cdp.set_writer(tx);
+        spawn_writer_task(sink, rx, cdp.clone());
+
         let conn = Connection::new(cdp.clone(), stream);
         tokio::spawn(conn.run());
 
