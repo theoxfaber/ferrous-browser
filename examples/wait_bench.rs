@@ -34,7 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let injected_at: f64 = page.evaluate("window.__injectedAt").await?;
         let gap = returned_at - injected_at;
         gaps_ms.push(gap);
-        println!("  [{r}] injected_at={injected_at:.1}ms returned_at={returned_at:.1}ms  gap={gap:.1}ms");
+        println!(
+            "  [{r}] injected_at={injected_at:.1}ms returned_at={returned_at:.1}ms  gap={gap:.1}ms"
+        );
     }
 
     gaps_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -50,7 +52,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

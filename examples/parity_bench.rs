@@ -23,7 +23,9 @@ fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -43,7 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!(
         "launch_chrome           median={:.1}ms  p10={:.1}ms  (n={})",
-        median(cold.clone()), p10(cold.clone()), cold.len()
+        median(cold.clone()),
+        p10(cold.clone()),
+        cold.len()
     );
 
     // Warm browser for all subsequent benches.
@@ -56,8 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _p = browser.new_page().await?;
         np.push(t.elapsed().as_secs_f64() * 1000.0);
     }
-    println!("new_page                median={:.1}ms  p10={:.1}ms  (n={})",
-        median(np.clone()), p10(np.clone()), ITERS);
+    println!(
+        "new_page                median={:.1}ms  p10={:.1}ms  (n={})",
+        median(np.clone()),
+        p10(np.clone()),
+        ITERS
+    );
 
     // 3. goto about:blank × ITERS on a warm page
     let page = browser.new_page().await?;
@@ -68,8 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         page.goto("about:blank", WaitUntil::Load).await?;
         gt.push(t.elapsed().as_secs_f64() * 1000.0);
     }
-    println!("goto about:blank        median={:.1}ms  p10={:.1}ms  (n={})",
-        median(gt.clone()), p10(gt.clone()), ITERS);
+    println!(
+        "goto about:blank        median={:.1}ms  p10={:.1}ms  (n={})",
+        median(gt.clone()),
+        p10(gt.clone()),
+        ITERS
+    );
 
     // 4. screenshot
     let mut ss = Vec::new();
@@ -78,8 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = page.screenshot().await?;
         ss.push(t.elapsed().as_secs_f64() * 1000.0);
     }
-    println!("screenshot              median={:.1}ms  p10={:.1}ms  (n={})",
-        median(ss.clone()), p10(ss.clone()), ITERS);
+    println!(
+        "screenshot              median={:.1}ms  p10={:.1}ms  (n={})",
+        median(ss.clone()),
+        p10(ss.clone()),
+        ITERS
+    );
 
     // 5. evaluate
     let mut ev = Vec::new();
@@ -88,8 +104,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _: String = page.evaluate("document.title").await?;
         ev.push(t.elapsed().as_secs_f64() * 1000.0);
     }
-    println!("evaluate                median={:.2}ms p10={:.2}ms (n={})",
-        median(ev.clone()), p10(ev.clone()), ITERS);
+    println!(
+        "evaluate                median={:.2}ms p10={:.2}ms (n={})",
+        median(ev.clone()),
+        p10(ev.clone()),
+        ITERS
+    );
 
     // 6. wait_for_selector reaction gap
     let html = "<html><body><script>\
@@ -110,8 +130,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let injected_at: f64 = page.evaluate("window.__injectedAt").await?;
         gaps.push(returned_at - injected_at);
     }
-    println!("wait_for_selector gap   median={:.2}ms p10={:.2}ms (n={})",
-        median(gaps.clone()), p10(gaps.clone()), ITERS);
+    println!(
+        "wait_for_selector gap   median={:.2}ms p10={:.2}ms (n={})",
+        median(gaps.clone()),
+        p10(gaps.clone()),
+        ITERS
+    );
 
     Ok(())
 }

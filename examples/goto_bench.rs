@@ -24,6 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let median = times[times.len() / 2];
     let p10 = times[times.len() / 10];
     println!("{ROUNDS} gotos to about:blank on a warm page:");
-    println!("  p10={p10:?}  median={median:?}  avg={avg:?}  max={:?}", times.last().unwrap());
+    println!(
+        "  p10={p10:?}  median={median:?}  avg={avg:?}  max={:?}",
+        times.last().unwrap()
+    );
     Ok(())
 }

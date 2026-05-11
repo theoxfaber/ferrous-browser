@@ -41,7 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pre-create one page so the warm screenshot/evaluate benches don't include
     // creation time.
     let warm_page = browser.new_page().await?;
-    warm_page.goto("https://example.com", WaitUntil::Load).await?;
+    warm_page
+        .goto("https://example.com", WaitUntil::Load)
+        .await?;
 
     println!("\nbench: new_page (x{ITERS})");
     for i in 0..ITERS {

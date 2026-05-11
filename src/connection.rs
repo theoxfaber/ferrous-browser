@@ -46,23 +46,21 @@ impl Connection {
 
         let termination_reason: String = loop {
             match stream.next().await {
-                Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<Value>(&text) {
-                        Ok(value) => match CDPMessage::from_json(value) {
-                            Ok(msg) => {
-                                if let Err(e) = self.cdp.handle_message(msg) {
-                                    tracing::warn!(error = %e, "handle_message failed");
-                                }
+                Some(Ok(Message::Text(text))) => match serde_json::from_str::<Value>(&text) {
+                    Ok(value) => match CDPMessage::from_json(value) {
+                        Ok(msg) => {
+                            if let Err(e) = self.cdp.handle_message(msg) {
+                                tracing::warn!(error = %e, "handle_message failed");
                             }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "malformed CDP message");
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(error = %e, "invalid JSON on CDP socket");
                         }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "malformed CDP message");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "invalid JSON on CDP socket");
                     }
-                }
+                },
                 Some(Ok(Message::Close(frame))) => {
                     break format!("WebSocket closed by peer: {frame:?}");
                 }

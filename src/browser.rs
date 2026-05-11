@@ -182,42 +182,38 @@ impl Browser {
         // is listening:
         //     DevTools listening on ws://127.0.0.1:<port>/devtools/browser/<id>
         // Read that and skip the HTTP-poll-and-200ms-sleep dance entirely.
-        let stderr = child
-            .stderr
-            .take()
-            .expect("stderr is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
 
-        let ws_url = tokio::time::timeout(config.timeout, async {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Some(line) = reader
-                .next_line()
-                .await
-                .map_err(|e| BrowserError::BrowserNotLaunched(format!("stderr read failed: {e}")))?
-            {
-                const PREFIX: &str = "DevTools listening on ";
-                if let Some(idx) = line.find(PREFIX) {
-                    let url = line[idx + PREFIX.len()..].trim().to_string();
-                    // Keep draining stderr so the pipe never fills up and
-                    // blocks Chrome on a future write.
-                    tokio::spawn(async move {
-                        let mut reader = reader;
-                        while let Ok(Some(_)) = reader.next_line().await {}
-                    });
-                    return Ok::<String, BrowserError>(url);
+        let ws_url =
+            tokio::time::timeout(config.timeout, async {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Some(line) = reader.next_line().await.map_err(|e| {
+                    BrowserError::BrowserNotLaunched(format!("stderr read failed: {e}"))
+                })? {
+                    const PREFIX: &str = "DevTools listening on ";
+                    if let Some(idx) = line.find(PREFIX) {
+                        let url = line[idx + PREFIX.len()..].trim().to_string();
+                        // Keep draining stderr so the pipe never fills up and
+                        // blocks Chrome on a future write.
+                        tokio::spawn(async move {
+                            let mut reader = reader;
+                            while let Ok(Some(_)) = reader.next_line().await {}
+                        });
+                        return Ok::<String, BrowserError>(url);
+                    }
                 }
-            }
-            Err(BrowserError::BrowserNotLaunched(
-                "Chrome exited before announcing its DevTools port".to_string(),
-            ))
-        })
-        .instrument(tracing::info_span!("wait_for_chrome_ready"))
-        .await
-        .map_err(|_| {
-            BrowserError::BrowserNotLaunched(format!(
-                "Chrome did not start within {}s",
-                config.timeout.as_secs()
-            ))
-        })??;
+                Err(BrowserError::BrowserNotLaunched(
+                    "Chrome exited before announcing its DevTools port".to_string(),
+                ))
+            })
+            .instrument(tracing::info_span!("wait_for_chrome_ready"))
+            .await
+            .map_err(|_| {
+                BrowserError::BrowserNotLaunched(format!(
+                    "Chrome did not start within {}s",
+                    config.timeout.as_secs()
+                ))
+            })??;
 
         // The tokio Child handle is no longer needed; lifetime is managed via
         // the stored Pid + SIGTERM in Drop, exactly as before.
