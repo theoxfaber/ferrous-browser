@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
+use tracing::Instrument;
 
 use crate::cdp::CDPClient;
 use crate::error::{BrowserError, Result};
@@ -273,6 +274,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self), fields(url = %url, wait_until = ?wait_until, session_id = %self.session_id))]
     pub async fn goto(&self, url: &str, wait_until: WaitUntil) -> Result<()> {
         const TIMEOUT_SECS: u64 = 30;
         let url_owned = url.to_string();
@@ -344,7 +346,7 @@ impl Page {
                     }
                 },
             }
-        })
+        }.instrument(tracing::info_span!("await_navigation", event = event_method)))
         .await;
 
         wait_result.map_err(|_| {
@@ -425,6 +427,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self), fields(expression_len = expression.len()))]
     pub async fn evaluate<T: DeserializeOwned>(&self, expression: &str) -> Result<T> {
         let result = self
             .send_command(
@@ -577,6 +580,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self))]
     pub async fn content(&self) -> Result<String> {
         let result = self
             .send_command(
@@ -611,6 +615,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self))]
     pub async fn screenshot(&self) -> Result<Vec<u8>> {
         let result = self
             .send_command("Page.captureScreenshot".to_string(), None)
@@ -621,7 +626,8 @@ impl Page {
             .and_then(|v| v.as_str())
             .ok_or_else(|| BrowserError::invalid_response("screenshot()", "missing data field"))?;
 
-        base64_decode(base64_data)
+        tracing::info_span!("base64_decode", b64_len = base64_data.len())
+            .in_scope(|| base64_decode(base64_data))
     }
 
     // ─── Network interception ────────────────────────────────────────────

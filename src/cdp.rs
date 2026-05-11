@@ -1,5 +1,6 @@
 use futures_util::SinkExt;
 use serde_json::{json, Value};
+use tracing::Instrument;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -163,10 +164,16 @@ impl CDPClient {
     }
 
     /// Send raw message through WebSocket
+    #[tracing::instrument(level = "debug", skip_all, fields(bytes = msg.len()))]
     pub async fn send_raw(&self, msg: String) -> Result<()> {
-        let mut ws = self.ws_sink.write().await;
+        let mut ws = self
+            .ws_sink
+            .write()
+            .instrument(tracing::info_span!("sink_lock"))
+            .await;
         if let Some(sink) = ws.as_mut() {
             sink.send(Message::Text(msg))
+                .instrument(tracing::info_span!("ws_write"))
                 .await
                 .map_err(|e| BrowserError::websocket("send_raw", e.to_string()))?;
         } else {
@@ -194,38 +201,47 @@ impl CDPClient {
     ///
     /// The response handler is registered **before** the message is sent so
     /// that fast Chrome replies are never dropped.
+    #[tracing::instrument(level = "info", skip(self, params), fields(method = %method, id))]
     pub async fn send_command(&self, method: String, params: Option<Value>) -> Result<Value> {
         let id = self.next_id();
+        tracing::Span::current().record("id", id);
         let request = CDPRequest::new(id, method.clone(), params);
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
         self.register_response_handler(id, tx).await;
-        let json_str = request.to_json().to_string();
-        self.send_raw(json_str).await?;
+        let json_str = tracing::info_span!("serialize").in_scope(|| request.to_json().to_string());
+        let bytes = json_str.len();
+        self.send_raw(json_str)
+            .instrument(tracing::info_span!("ws_send", bytes))
+            .await?;
         // ─────────────────────────────────────────────────────────────────────
 
         const TIMEOUT_SECS: u64 = 30;
-        match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(_)) => Err(BrowserError::command_failed(
-                &method,
-                "response channel closed unexpectedly",
-            )),
-            Err(_) => {
-                let mut pending = self.pending_responses.write().await;
-                pending.remove(&id);
-                Err(BrowserError::timeout(
-                    format!("waiting for response to '{method}'"),
-                    TIMEOUT_SECS,
-                ))
+        let wait = async {
+            match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(_)) => Err(BrowserError::command_failed(
+                    &method,
+                    "response channel closed unexpectedly",
+                )),
+                Err(_) => {
+                    let mut pending = self.pending_responses.write().await;
+                    pending.remove(&id);
+                    Err(BrowserError::timeout(
+                        format!("waiting for response to '{method}'"),
+                        TIMEOUT_SECS,
+                    ))
+                }
             }
-        }
+        };
+        wait.instrument(tracing::info_span!("await_response")).await
     }
 
     /// Send a command to a specific page session.
     ///
     /// The response handler is registered **before** the message is sent.
+    #[tracing::instrument(level = "info", skip(self, params), fields(method = %method, id, session_id = %session_id))]
     pub async fn send_command_with_session(
         &self,
         session_id: &str,
@@ -233,31 +249,38 @@ impl CDPClient {
         params: Option<Value>,
     ) -> Result<Value> {
         let id = self.next_id();
+        tracing::Span::current().record("id", id);
         let request = CDPRequest::with_session(id, method.clone(), params, session_id.to_string());
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
         self.register_response_handler(id, tx).await;
-        let json_str = request.to_json().to_string();
-        self.send_raw(json_str).await?;
+        let json_str = tracing::info_span!("serialize").in_scope(|| request.to_json().to_string());
+        let bytes = json_str.len();
+        self.send_raw(json_str)
+            .instrument(tracing::info_span!("ws_send", bytes))
+            .await?;
         // ─────────────────────────────────────────────────────────────────────
 
         const TIMEOUT_SECS: u64 = 30;
-        match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(_)) => Err(BrowserError::command_failed(
-                &method,
-                "response channel closed unexpectedly",
-            )),
-            Err(_) => {
-                let mut pending = self.pending_responses.write().await;
-                pending.remove(&id);
-                Err(BrowserError::timeout(
-                    format!("waiting for response to '{method}'"),
-                    TIMEOUT_SECS,
-                ))
+        let wait = async {
+            match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(_)) => Err(BrowserError::command_failed(
+                    &method,
+                    "response channel closed unexpectedly",
+                )),
+                Err(_) => {
+                    let mut pending = self.pending_responses.write().await;
+                    pending.remove(&id);
+                    Err(BrowserError::timeout(
+                        format!("waiting for response to '{method}'"),
+                        TIMEOUT_SECS,
+                    ))
+                }
             }
-        }
+        };
+        wait.instrument(tracing::info_span!("await_response")).await
     }
 
     /// Register a pending response handler
@@ -267,10 +290,15 @@ impl CDPClient {
     }
 
     /// Handle an incoming CDP message — called by `Connection`
+    #[tracing::instrument(level = "debug", skip_all, fields(method = ?msg.method, id = ?msg.id))]
     pub async fn handle_message(&self, msg: CDPMessage) -> Result<()> {
         if let Some(id) = msg.id {
             // It's a response to one of our commands
-            let mut pending = self.pending_responses.write().await;
+            let mut pending = self
+                .pending_responses
+                .write()
+                .instrument(tracing::info_span!("pending_lock_write"))
+                .await;
             if let Some(tx) = pending.remove(&id) {
                 if let Some(error) = msg.error {
                     let _ = tx.send(json!({ "error": error }));

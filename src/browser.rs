@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 // ── P4: BrowserConfig ────────────────────────────────────────────────────────
 
@@ -128,6 +129,8 @@ impl Browser {
     /// # }
     /// ```
     pub async fn launch_chrome(config: Option<BrowserConfig>) -> Result<Self> {
+        let span = tracing::info_span!("Browser::launch_chrome");
+        let _enter = span.enter();
         let config = config.unwrap_or_default();
 
         let chrome_path = Self::find_chrome().ok_or_else(|| {
@@ -151,35 +154,58 @@ impl Browser {
         }
         chrome_args.extend(config.args.iter().cloned());
 
-        let child = Command::new(&chrome_path)
-            .args(&chrome_args)
-            .spawn()
-            .map_err(|e| {
-                BrowserError::BrowserNotLaunched(format!(
-                    "Failed to spawn Chrome at '{chrome_path}': {e}"
-                ))
-            })?;
+        let child = tracing::info_span!("spawn_chrome").in_scope(|| {
+            Command::new(&chrome_path)
+                .args(&chrome_args)
+                .spawn()
+                .map_err(|e| {
+                    BrowserError::BrowserNotLaunched(format!(
+                        "Failed to spawn Chrome at '{chrome_path}': {e}"
+                    ))
+                })
+        })?;
 
         let pid = Pid::from_raw(child.id() as i32);
 
-        // Poll until Chrome's HTTP endpoint is ready and fetch the WebSocket URL
-        let deadline = tokio::time::Instant::now() + config.timeout;
-        let ws_url = loop {
-            if let Ok(resp) = reqwest::get(format!("http://localhost:{port}/json/version")).await {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(url) = json.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
-                        break url.to_string();
+        // Poll until Chrome's HTTP endpoint is ready and fetch the WebSocket URL.
+        let poll_span = tracing::info_span!("wait_for_chrome_ready");
+        let ws_url = async {
+            let deadline = tokio::time::Instant::now() + config.timeout;
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                let probe = async {
+                    if let Ok(resp) =
+                        reqwest::get(format!("http://localhost:{port}/json/version")).await
+                    {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            return json
+                                .get("webSocketDebuggerUrl")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                        }
                     }
+                    None
+                };
+                if let Some(url) = probe
+                    .instrument(tracing::info_span!("probe", attempt))
+                    .await
+                {
+                    return Ok::<_, BrowserError>(url);
                 }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(BrowserError::BrowserNotLaunched(format!(
+                        "Chrome did not start within {}s",
+                        config.timeout.as_secs()
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(200))
+                    .instrument(tracing::info_span!("backoff_sleep", ms = 200u64))
+                    .await;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(BrowserError::BrowserNotLaunched(format!(
-                    "Chrome did not start within {}s",
-                    config.timeout.as_secs()
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        };
+        }
+        .instrument(poll_span)
+        .await?;
 
         Self::connect_internal(ws_url, Some(pid)).await
     }
@@ -246,6 +272,7 @@ impl Browser {
     }
 
     /// Create a new page/tab in the browser.
+    #[tracing::instrument(level = "info", skip(self))]
     pub async fn new_page(&self) -> Result<Page> {
         // Subscribe to events BEFORE creating target so we don't miss attachedToTarget
         let mut event_rx = self.cdp.subscribe_events();
@@ -270,32 +297,41 @@ impl Browser {
             .to_string();
 
         // Wait for the automatic Target.attachedToTarget event for this targetId
-        let session_id = loop {
-            match event_rx.recv().await {
-                Ok(msg) if msg.method.as_deref() == Some("Target.attachedToTarget") => {
-                    if let Some(params) = msg.params {
-                        let msg_target_id = params
-                            .get("targetInfo")
-                            .and_then(|t| t.get("targetId"))
-                            .and_then(|t| t.as_str());
-                        if msg_target_id == Some(&target_id) {
-                            if let Some(sess_id) = params.get("sessionId").and_then(|s| s.as_str())
-                            {
-                                break sess_id.to_string();
+        let target_id_for_span = target_id.clone();
+        let session_id = async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(msg) if msg.method.as_deref() == Some("Target.attachedToTarget") => {
+                        if let Some(params) = msg.params {
+                            let msg_target_id = params
+                                .get("targetInfo")
+                                .and_then(|t| t.get("targetId"))
+                                .and_then(|t| t.as_str());
+                            if msg_target_id == Some(&target_id) {
+                                if let Some(sess_id) =
+                                    params.get("sessionId").and_then(|s| s.as_str())
+                                {
+                                    return Ok::<String, BrowserError>(sess_id.to_string());
+                                }
                             }
                         }
                     }
-                }
-                Ok(_) => {} // ignore other events
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(_) => {
-                    return Err(BrowserError::invalid_response(
-                        "new_page()",
-                        "event channel closed before Target.attachedToTarget",
-                    ));
+                    Ok(_) => {} // ignore other events
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => {
+                        return Err(BrowserError::invalid_response(
+                            "new_page()",
+                            "event channel closed before Target.attachedToTarget",
+                        ));
+                    }
                 }
             }
-        };
+        }
+        .instrument(tracing::info_span!(
+            "await_attachedToTarget",
+            target_id = %target_id_for_span
+        ))
+        .await?;
 
         let page = Page::new(target_id, session_id, self.cdp.clone());
         self.pages.write().await.push(page.clone());
