@@ -14,3 +14,4 @@ Cargo.lock
 # Test artifacts
 screenshot.png
 *.log
+ferrous-trace.json
