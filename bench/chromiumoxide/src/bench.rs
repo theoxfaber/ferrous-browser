@@ -4,7 +4,7 @@ use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use futures::StreamExt;
 use std::time::{Duration, Instant};
 
-const CHROME_PATH: &str = "/home/claude/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome";
+const CHROME_PATH: &str = "/home/ken/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome";
 const ITERS: usize = 20;
 
 fn median(mut xs: Vec<f64>) -> f64 {

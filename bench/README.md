@@ -1,7 +1,7 @@
 # Benchmarks
 
 Apples-to-apples benchmarks comparing `ferrous-browser` against Puppeteer,
-Playwright, and chromiumoxide.
+Playwright, chromiumoxide, and headless_chrome.
 
 ## Methodology
 
@@ -46,6 +46,9 @@ cd bench/playwright && npm install && node bench.js
 
 # chromiumoxide
 cd bench/chromiumoxide && cargo run --release
+
+# headless_chrome
+cd bench/headless_chrome && cargo run --release
 ```
 
 Each run takes 30–90 seconds depending on the library.

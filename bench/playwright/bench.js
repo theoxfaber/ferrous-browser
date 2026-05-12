@@ -5,7 +5,7 @@
 const { chromium } = require('playwright');
 const { performance } = require('perf_hooks');
 
-const CHROME_PATH = '/home/claude/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome';
+const CHROME_PATH = '/home/ken/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome';
 const ITERS = 20;
 
 function median(xs) { const s = [...xs].sort((a,b)=>a-b); return s[Math.floor(s.length/2)]; }

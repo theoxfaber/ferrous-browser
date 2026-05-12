@@ -166,27 +166,29 @@ page.goto("https://example.com", WaitUntil::Load)
 
 Apples-to-apples, **same Chrome binary** (Chrome for Testing 131.0.6778.204), same machine, same Linux host, headless, warm browser unless noted, 20 iterations per metric, 3 runs, median of medians. Bench harnesses for every library live under [`bench/`](bench/); feel free to reproduce.
 
-| Operation | ferrous-browser | Puppeteer | Playwright | chromiumoxide |
-|-----------|----------------:|----------:|-----------:|--------------:|
-| `launch_chrome` (cold) | 268 ms | 269 ms | **176 ms** | 217 ms |
-| `new_page` (warm browser) | **52 ms** | 81 ms | 87 ms | 79 ms |
-| `goto` (`about:blank`, warm) | 15 ms | 14 ms | 14 ms | **11 ms** |
-| `screenshot` (PNG) | 50 ms | 50 ms | 50 ms | 50 ms |
-| `evaluate` (`document.title`) | **0.13 ms** | 0.63 ms | 0.97 ms | 0.15 ms |
-| `wait_for_selector` reaction gap¹ | **1.1 ms** | 4.9 ms | 26.3 ms | 16.6 ms² |
+| Operation | ferrous-browser | Puppeteer | Playwright | chromiumoxide | headless_chrome |
+|-----------|----------------:|----------:|-----------:|--------------:|----------------:|
+| `launch_chrome` (cold) | 357 ms | 162 ms | **93 ms** | 134 ms | 239 ms |
+| `new_page` (warm browser) | **14 ms** | 23 ms | 28 ms | 24 ms | 517 ms³ |
+| `goto` (`about:blank`, warm) | 6.2 ms | 5.1 ms | 4.7 ms | **4.3 ms** | 2137 ms³ |
+| `screenshot` (PNG) | **37 ms** | 41 ms | 50 ms | 38 ms | 120 ms |
+| `evaluate` (`document.title`) | 0.22 ms | 0.45 ms | 0.79 ms | **0.18 ms** | 104 ms³ |
+| `wait_for_selector` reaction gap¹ | **1.1 ms** | 3.4 ms | 102 ms | 17.5 ms² | 2404 ms³ |
 
 ¹ *Reaction gap* is the time between an element being inserted into the DOM and `wait_for_selector` returning. This is the cost of polling vs. observing, and the difference users actually feel in real tests. See [Selector waits, in detail](#selector-waits-in-detail) below.
 
 ² chromiumoxide has no built-in `wait_for_selector`; the canonical user pattern is a manual retry loop. The number above uses `sleep(50 ms)` between checks, which is what its examples suggest.
 
+³ `headless_chrome` ships a synchronous API whose internal transport polls the websocket response channel every 5 ms and whose `Wait` primitives default to a 100 ms sleep. `wait_until_navigated` waits for `networkAlmostIdle` (no public option for `load`-only), so its `goto` measurement isn't directly comparable to the `waitUntil: 'load'` semantics used by the other rows. The floor on `evaluate` (~104 ms) is one poll cycle of that internal `Wait`.
+
 ### What this actually tells you
 
-- **`launch_chrome`** is roughly even with Puppeteer and slower than Playwright (176 ms). Playwright's edge here is worth investigating; for now we read Chrome's `DevTools listening on ws://...` line off stderr instead of polling the `/json/version` HTTP endpoint, which removes a 200 ms backoff loop and the HTTP retry budget.
-- **`new_page`** is where library design starts to show. ferrous-browser uses `Target.setAutoAttach` so a new tab's session is bound without a second roundtrip, and lazy-enables the `Page` domain exactly once per session rather than on every `goto` (saves one CDP round-trip per navigation; the win scales with RTT).
-- **`goto`** to `about:blank` is dominated by Chrome (11–15 ms across the board). Real navigation is dominated by the network, not the library.
-- **`screenshot`** is Chrome's own work; every library lands at exactly 50 ms. All four default to viewport-only PNG capture, which is why they cluster. Library overhead here is rounding error.
-- **`evaluate`** is roughly 5x faster than the Node-based libraries because we don't pay the Node-to-Chrome IPC hop on top of Chrome's own latency; we're a single process talking straight to Chrome.
-- **`wait_for_selector` reaction gap** is the biggest gap, and it's the one users notice on every test. ferrous-browser pushes the wait into the page itself via a MutationObserver-backed Promise that Chrome holds open until the selector matches, so reaction latency is bounded by one CDP round-trip rather than by anyone's poll interval.
+- **`launch_chrome`** is slower than Playwright and Puppeteer on this run. The Node libraries skip a chunk of in-process setup that the Rust crates pay synchronously. ferrous reads Chrome's `DevTools listening on ws://...` line off stderr instead of polling the `/json/version` HTTP endpoint, which removes a 200 ms backoff loop, but there is still room to close the gap vs Playwright.
+- **`new_page`** is where library design starts to show. ferrous-browser uses `Target.setAutoAttach` so a new tab's session is bound without a second roundtrip, and lazy-enables the `Page` domain exactly once per session rather than on every `goto` (saves one CDP round-trip per navigation; the win scales with RTT). `headless_chrome`'s 517 ms here is its sync transport waiting on the new-target attachment via its 100 ms `Wait` primitive.
+- **`goto`** to `about:blank` is dominated by Chrome (4–6 ms across the modern async libraries). Real navigation is dominated by the network, not the library. `headless_chrome`'s 2.1 s is not slow Chrome; it's its sync `wait_until_navigated` waiting for `networkAlmostIdle` through a 100 ms-resolution polling loop.
+- **`screenshot`** is mostly Chrome's own work; the four modern libraries land between 37 and 50 ms. Library overhead here is small. `headless_chrome` is ~3x slower because each CDP method call goes through its polling transport.
+- **`evaluate`** in ferrous, Puppeteer, Playwright, and chromiumoxide is sub-millisecond — they all do a single CDP round-trip and pick up the response off an event loop or channel. `headless_chrome`'s 104 ms is *exactly* one cycle of its internal 100 ms `Wait` sleep.
+- **`wait_for_selector` reaction gap** is the biggest gap among the async libraries, and it's the one users notice on every test. ferrous-browser pushes the wait into the page itself via a MutationObserver-backed Promise that Chrome holds open until the selector matches, so reaction latency is bounded by one CDP round-trip rather than by anyone's poll interval.
 
 ### Selector waits, in detail
 
@@ -195,13 +197,14 @@ In real test suites and scrapers, `wait_for_selector` is called dozens to hundre
 Here's how each library reacts to an element that gets inserted at a known instant in the page:
 
 ```
-ferrous-browser   median 1.1 ms   max 1.3 ms     ← in-page MutationObserver, awaited via CDP
-Puppeteer         median 4.9 ms   max ~10  ms    ← polls on requestAnimationFrame
-chromiumoxide     median 16.6 ms  max ~30  ms    ← no built-in; user-written 50 ms poll loop
-Playwright        median 26.3 ms  max ~35  ms    ← internal polling, ~25 ms cadence
+ferrous-browser   median 1.1 ms     max ~1.3 ms     ← in-page MutationObserver, awaited via CDP
+Puppeteer         median 3.4 ms     max ~5   ms     ← polls on requestAnimationFrame
+chromiumoxide     median 17.5 ms    max ~30  ms     ← no built-in; user-written 50 ms poll loop
+Playwright        median 102 ms     max ~105 ms     ← internal polling, sits on a 100 ms cadence
+headless_chrome   median 2,404 ms   max ~2.4 s      ← sync transport, 100 ms Wait cycles compound
 ```
 
-So on a test that does 100 `waitFor`s, ferrous-browser saves roughly **2.5 seconds vs Playwright** and **1.6 seconds vs chromiumoxide** purely from lower reaction latency, with no change in your code.
+So on a test that does 100 `waitFor`s, ferrous-browser saves roughly **10 seconds vs Playwright**, **1.6 seconds vs chromiumoxide**, and minutes vs `headless_chrome` purely from lower reaction latency, with no change in your code.
 
 ### Earlier benchmarks (macOS, Chrome 147)
 
@@ -287,13 +290,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | | ferrous-browser | chromiumoxide | headless_chrome |
 |---|---|---|---|
 | Language | Rust | Rust | Rust |
+| Async runtime | tokio | tokio | none (sync) |
 | Node.js required | ❌ | ❌ | ❌ |
-| Actively maintained | ✅ | ⚠️ stale | ❌ archived |
+| Actively maintained | ✅ | ⚠️ stale | ✅ (community fork)¹ |
 | Multi-page session isolation | ✅ | ✅ | ⚠️ |
-| `page.evaluate::<T>()` | ✅ | ✅ | ✅ |
+| `page.evaluate::<T>()` | ✅ | ✅ | ⚠️ returns `RemoteObject` |
 | Locator API | ✅ | ❌ | ❌ |
-| `WaitUntil::NetworkIdle` | ✅ | ❌ | ❌ |
+| `WaitUntil::NetworkIdle` | ✅ configurable | ❌ | ⚠️ hard-coded only |
 | Structured errors | ✅ | ⚠️ | ⚠️ |
+
+¹ The original `atroche/rust-headless-chrome` stopped seeing commits in Feb 2024; the crate is now maintained by the `rust-headless-chrome` GitHub org, latest release `1.0.21` on 2026-02-03. Note that its sync transport polls at 100 ms — see the benchmark footnote.
 
 ---
 
