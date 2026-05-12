@@ -4,8 +4,15 @@ use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use futures::StreamExt;
 use std::time::{Duration, Instant};
 
-const CHROME_PATH: &str = "/home/ken/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome";
 const ITERS: usize = 20;
+
+fn chrome_path() -> String {
+    if let Ok(p) = std::env::var("CHROME_PATH") {
+        return p;
+    }
+    let home = std::env::var("HOME").expect("HOME must be set or CHROME_PATH must be provided");
+    format!("{home}/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome")
+}
 
 fn median(mut xs: Vec<f64>) -> f64 {
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -28,7 +35,7 @@ fn urlencode(s: &str) -> String {
 
 async fn launch_once() -> Result<Browser, Box<dyn std::error::Error>> {
     let config = BrowserConfig::builder()
-        .chrome_executable(CHROME_PATH)
+        .chrome_executable(chrome_path())
         .arg("--no-sandbox")
         .arg("--disable-gpu")
         .arg("--disable-dev-shm-usage")

@@ -6,9 +6,17 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-const CHROME_PATH: &str =
-    "/home/ken/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome";
 const ITERS: usize = 20;
+
+fn chrome_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CHROME_PATH") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var("HOME").expect("HOME must be set or CHROME_PATH must be provided");
+    PathBuf::from(format!(
+        "{home}/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome"
+    ))
+}
 
 fn median(mut xs: Vec<f64>) -> f64 {
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -41,7 +49,7 @@ fn launch_once() -> Result<Browser> {
     let options = LaunchOptions {
         headless: true,
         sandbox: false,
-        path: Some(PathBuf::from(CHROME_PATH)),
+        path: Some(chrome_path()),
         args: extra_args,
         ..Default::default()
     };

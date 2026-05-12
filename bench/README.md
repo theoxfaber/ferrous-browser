@@ -6,12 +6,13 @@ Playwright, chromiumoxide, and headless_chrome.
 ## Methodology
 
 Every harness uses **the same Chrome binary** so library overhead is the only
-variable. Adjust `CHROME_PATH` near the top of each script if yours lives
-elsewhere; by default they look in the puppeteer cache:
+variable. By default each harness looks in the puppeteer cache:
 
 ```
-/home/<user>/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome
+$HOME/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome
 ```
+
+Set the `CHROME_PATH` environment variable to override (e.g. `CHROME_PATH=/usr/bin/chromium cargo run --release`).
 
 Each harness measures the same six operations with the same iteration counts:
 
