@@ -14,3 +14,9 @@ Cargo.lock
 # Test artifacts
 screenshot.png
 *.log
+ferrous-trace.json
+bench/puppeteer/node_modules/
+bench/playwright/node_modules/
+bench/chromiumoxide/target/
+bench/*/node_modules/
+bench/*/node_modules

@@ -29,29 +29,58 @@ impl Connection {
     }
 
     /// Start the connection loop.
+    ///
+    /// Runs forever, dispatching incoming CDP messages to the `CDPClient`.
+    /// When the WebSocket terminates (cleanly, with an error, or with EOF),
+    /// every still-pending CDP request is failed immediately so callers don't
+    /// hang waiting for a 30 second per-command timeout.
     pub async fn run(self) -> Result<()> {
         let mut stream_guard = self.stream.write().await;
-        if let Some(mut stream) = stream_guard.take() {
-            drop(stream_guard);
-            loop {
-                match stream.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                            if let Ok(msg) = CDPMessage::from_json(value) {
-                                let _ = self.cdp.handle_message(msg).await;
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => return Ok(()),
-                    Some(Err(_)) => return Ok(()),
-                    Some(Ok(_)) => {}
-                }
-            }
-        } else {
-            Err(crate::error::BrowserError::websocket(
+        let Some(mut stream) = stream_guard.take() else {
+            return Err(crate::error::BrowserError::websocket(
                 "Connection::run",
                 "WebSocket stream not available",
-            ))
-        }
+            ));
+        };
+        drop(stream_guard);
+
+        let termination_reason: String = loop {
+            match stream.next().await {
+                Some(Ok(Message::Text(text))) => match serde_json::from_str::<Value>(&text) {
+                    Ok(value) => match CDPMessage::from_json(value) {
+                        Ok(msg) => {
+                            if let Err(e) = self.cdp.handle_message(msg) {
+                                tracing::warn!(error = %e, "handle_message failed");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "malformed CDP message");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "invalid JSON on CDP socket");
+                    }
+                },
+                Some(Ok(Message::Close(frame))) => {
+                    break format!("WebSocket closed by peer: {frame:?}");
+                }
+                None => {
+                    break "WebSocket stream ended (no more frames)".to_string();
+                }
+                Some(Err(e)) => {
+                    tracing::error!(error = %e, "WebSocket read error; tearing down");
+                    break format!("WebSocket error: {e}");
+                }
+                Some(Ok(_)) => {
+                    // Binary, Ping, Pong, and Frame messages aren't part of
+                    // the CDP text protocol; ignore.
+                }
+            }
+        };
+
+        // Wake every in-flight `send_command` with a clean failure rather
+        // than letting each one time out individually.
+        self.cdp.fail_all_pending(&termination_reason);
+        Ok(())
     }
 }

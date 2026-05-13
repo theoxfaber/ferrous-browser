@@ -21,15 +21,49 @@ base64 = "0.21"
 reqwest = { version = "0.12", features = ["json"] }
 which = "7"
 nix = { version = "0.29", features = ["process", "signal"] }
+# Tracing instrumentation. Effectively free at runtime when no subscriber is
+# installed (each span is one atomic load), so library users pay nothing
+# unless they opt in.
+tracing = "0.1"
+# Optional Tracy backend. Off by default; enable with `--features tracy`.
+# Requires the Tracy standalone profiler GUI to connect and view traces.
+tracing-tracy = { version = "0.11", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 env_logger = "0.11"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Chrome-trace-format JSON. Open at https://ui.perfetto.dev or chrome://tracing
+tracing-chrome = "0.7"
+
+[features]
+default = []
+tracy = ["dep:tracing-tracy"]
 
 [[bench]]
 name = "browser_bench"
 harness = false
 
+[[example]]
+name = "profile_run"
+path = "examples/profile_run.rs"
+
 [lib]
 name = "ferrous_browser"
 path = "src/lib.rs"
+
+[[example]]
+name = "launch_bench"
+path = "examples/launch_bench.rs"
+
+[[example]]
+name = "goto_bench"
+path = "examples/goto_bench.rs"
+
+[[example]]
+name = "wait_bench"
+path = "examples/wait_bench.rs"
+
+[[example]]
+name = "parity_bench"
+path = "examples/parity_bench.rs"

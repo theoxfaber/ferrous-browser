@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
+use tracing::Instrument;
 
 use crate::cdp::CDPClient;
 use crate::error::{BrowserError, Result};
@@ -213,6 +214,11 @@ pub struct Page {
     pub session_id: String,
     /// Reference to CDP client
     cdp: Arc<CDPClient>,
+    /// Lazily-enabled Page domain: the first `goto` (or anything else that
+    /// needs Page events) drives the one-time `Page.enable` round-trip; any
+    /// concurrent callers wait on it; subsequent callers see it already
+    /// resolved and pay nothing. Clones of a `Page` share this state via Arc.
+    page_enabled: Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl Page {
@@ -223,7 +229,31 @@ impl Page {
             target_id,
             session_id,
             cdp,
+            page_enabled: Arc::new(tokio::sync::OnceCell::new()),
         }
+    }
+
+    /// Ensure the Page domain is enabled on this session. Cheap on every
+    /// call after the first: once `get_or_init` resolves, subsequent calls
+    /// return synchronously from the OnceCell without locking or awaiting.
+    ///
+    /// `Page.enable` only needs to fire once per session (the events it
+    /// unlocks are sticky), so cache completion in a OnceCell. Concurrent
+    /// first-callers cooperate; later callers pay nothing.
+    async fn ensure_page_enabled(&self) {
+        let cdp = self.cdp.clone();
+        let sid = self.session_id.clone();
+        self.page_enabled
+            .get_or_init(|| async move {
+                // Swallow the error: a failed Page.enable surfaces later as a
+                // clearer navigation timeout, and turning a transient Chrome
+                // hiccup at session init into a permanent failure for this
+                // Page is worse than a deferred error.
+                let _ = cdp
+                    .send_command_with_session(&sid, "Page.enable".to_string(), None)
+                    .await;
+            })
+            .await;
     }
 
     // ─── P3: Locator entry point ──────────────────────────────────────────
@@ -273,6 +303,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self), fields(url = %url, wait_until = ?wait_until, session_id = %self.session_id))]
     pub async fn goto(&self, url: &str, wait_until: WaitUntil) -> Result<()> {
         const TIMEOUT_SECS: u64 = 30;
         let url_owned = url.to_string();
@@ -290,7 +321,10 @@ impl Page {
         let mut event_rx = self.cdp.subscribe_events();
         // ─────────────────────────────────────────────────────────────────────
 
-        let _ = self.send_command("Page.enable".to_string(), None).await;
+        // First goto on this page also enables Page domain events. All
+        // concurrent gotos on the same Page cooperate via OnceCell rather
+        // than each sending their own Page.enable.
+        self.ensure_page_enabled().await;
 
         let response = self
             .send_command("Page.navigate".to_string(), Some(json!({ "url": url })))
@@ -344,7 +378,7 @@ impl Page {
                     }
                 },
             }
-        })
+        }.instrument(tracing::info_span!("await_navigation", event = event_method)))
         .await;
 
         wait_result.map_err(|_| {
@@ -425,6 +459,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self), fields(expression_len = expression.len()))]
     pub async fn evaluate<T: DeserializeOwned>(&self, expression: &str) -> Result<T> {
         let result = self
             .send_command(
@@ -467,39 +502,70 @@ impl Page {
     }
 
     /// Wait for an element matching `selector` with a custom timeout.
+    ///
+    /// Implementation note: we push the *entire* wait into Chrome with a
+    /// MutationObserver-backed Promise and use `Runtime.evaluate`'s
+    /// `awaitPromise: true` so Chrome holds the response until the element
+    /// appears (or the timer fires). Net result is one CDP round-trip per
+    /// call and a reaction latency bounded by the DOM mutation that
+    /// inserted the element, not by a polling interval.
     pub async fn wait_for_selector_with_timeout(
         &self,
         selector: &str,
         dur: Duration,
     ) -> Result<()> {
-        let selector = selector.to_string();
-        let timeout_secs = dur.as_secs();
+        let timeout_ms = dur.as_millis() as u64;
+        // The selector is interpolated into a JS string literal, so escape
+        // anything that would break out of it. serde_json::to_string gives
+        // us a properly-quoted JS string for free.
+        let selector_lit = serde_json::to_string(selector).expect("selector is valid utf-8");
 
-        let fut = async {
-            loop {
-                let expr = format!("!!document.querySelector('{}')", escape_selector(&selector),);
-                let result = self
-                    .send_command(
-                        "Runtime.evaluate".to_string(),
-                        Some(json!({ "expression": expr, "returnByValue": true })),
-                    )
-                    .await?;
+        let expr = format!(
+            r#"new Promise((resolve) => {{
+                const sel = {selector_lit};
+                if (document.querySelector(sel)) {{ resolve(true); return; }}
+                const observer = new MutationObserver(() => {{
+                    if (document.querySelector(sel)) {{
+                        observer.disconnect();
+                        clearTimeout(timer);
+                        resolve(true);
+                    }}
+                }});
+                const timer = setTimeout(() => {{
+                    observer.disconnect();
+                    resolve(false);
+                }}, {timeout_ms});
+                observer.observe(document, {{
+                    childList: true, subtree: true, attributes: true
+                }});
+            }})"#
+        );
 
-                if let Some(true) = result
-                    .get("result")
-                    .and_then(|r| r.get("value"))
-                    .and_then(|v| v.as_bool())
-                {
-                    return Ok::<(), BrowserError>(());
-                }
+        let result = self
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({
+                    "expression": expr,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await?;
 
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        };
+        let appeared = result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        timeout(dur, fut).await.map_err(|_| {
-            BrowserError::timeout(format!("waiting for selector '{}'", selector), timeout_secs)
-        })?
+        if appeared {
+            Ok(())
+        } else {
+            Err(BrowserError::timeout(
+                format!("waiting for selector '{selector}'"),
+                dur.as_secs(),
+            ))
+        }
     }
 
     // ─── Interaction helpers (internal, also used by Locator) ─────────────
@@ -577,6 +643,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self))]
     pub async fn content(&self) -> Result<String> {
         let result = self
             .send_command(
@@ -611,6 +678,7 @@ impl Page {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(level = "info", skip(self))]
     pub async fn screenshot(&self) -> Result<Vec<u8>> {
         let result = self
             .send_command("Page.captureScreenshot".to_string(), None)
@@ -621,7 +689,8 @@ impl Page {
             .and_then(|v| v.as_str())
             .ok_or_else(|| BrowserError::invalid_response("screenshot()", "missing data field"))?;
 
-        base64_decode(base64_data)
+        tracing::info_span!("base64_decode", b64_len = base64_data.len())
+            .in_scope(|| base64_decode(base64_data))
     }
 
     // ─── Network interception ────────────────────────────────────────────
