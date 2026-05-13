@@ -20,7 +20,7 @@
 // Each scenario prints median / p10 / p90 / mean / σ over ITERS iterations.
 // A summary JSON line is appended at the end for external aggregation.
 //
-use ferrous_browser::{Browser, Page, WaitUntil};
+use ferrous_browser::{Browser, BrowserConfig, Page, WaitUntil};
 use serde_json::json;
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -88,6 +88,25 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+fn bench_chrome_path() -> String {
+    if let Ok(path) = std::env::var("CHROME_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let home = std::env::var("HOME").expect("HOME must be set or CHROME_PATH must be provided");
+    format!("{home}/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome")
+}
+
+fn bench_browser_config() -> BrowserConfig {
+    BrowserConfig {
+        chrome_path: Some(bench_chrome_path()),
+        ..Default::default()
+    }
 }
 
 // ─── scenarios ───────────────────────────────────────────────────────────────
@@ -259,7 +278,7 @@ async fn scenario_c_new(page: &Page) -> Result<Stats, AnyError> {
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
-    let browser = Browser::launch_chrome(None).await?;
+    let browser = Browser::launch_chrome(Some(bench_browser_config())).await?;
     let page = browser.new_page().await?;
     // Warm the chrome-side caches so first scenario isn't penalised.
     page.goto("about:blank", WaitUntil::Load).await?;

@@ -10,10 +10,29 @@
 //!     cargo run --release --features tracy --example profile_run
 //! (and have the Tracy GUI listening; it auto-connects.)
 
-use ferrous_browser::{Browser, WaitUntil};
+use ferrous_browser::{Browser, BrowserConfig, WaitUntil};
 use std::time::Instant;
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::{prelude::*, EnvFilter};
+
+fn bench_chrome_path() -> String {
+    if let Ok(path) = std::env::var("CHROME_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let home = std::env::var("HOME").expect("HOME must be set or CHROME_PATH must be provided");
+    format!("{home}/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome")
+}
+
+fn bench_browser_config() -> BrowserConfig {
+    BrowserConfig {
+        chrome_path: Some(bench_chrome_path()),
+        ..Default::default()
+    }
+}
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_start = Instant::now();
     println!("Launching Chrome…");
-    let browser = Browser::launch_chrome(None).await?;
+    let browser = Browser::launch_chrome(Some(bench_browser_config())).await?;
     println!("  launch_chrome took {:?}", total_start.elapsed());
 
     // Pre-create one page so the warm screenshot/evaluate benches don't include

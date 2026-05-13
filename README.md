@@ -120,6 +120,7 @@ let config = BrowserConfig {
     headless: false,                        // visible window
     timeout: Duration::from_secs(60),       // startup timeout
     viewport: (1920, 1080),                 // window size
+    chrome_path: Some("/usr/bin/chromium".into()), // optional explicit binary
     args: vec!["--disable-extensions".to_string()],
 };
 
@@ -131,6 +132,7 @@ let browser = Browser::launch_chrome(Some(config)).await?;
 | `headless` | `true` | Headless mode |
 | `timeout` | 30 s | Chrome startup deadline |
 | `viewport` | 1280×720 | Window size in logical pixels |
+| `chrome_path` | auto-discover | Explicit Chrome/Chromium executable path |
 | `args` | `[]` | Extra Chrome CLI flags |
 
 ---

@@ -4,9 +4,8 @@ use crate::error::{BrowserError, Result};
 use crate::page::Page;
 use nix::unistd::Pid;
 use serde_json::json;
-use std::net::TcpListener;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -32,6 +31,7 @@ use tracing::Instrument;
 ///     headless: true,
 ///     timeout: Duration::from_secs(60),
 ///     viewport: (1920, 1080),
+///     chrome_path: None,
 ///     args: vec!["--disable-extensions".to_string()],
 /// };
 /// let browser = Browser::launch_chrome(Some(config)).await?;
@@ -46,6 +46,12 @@ pub struct BrowserConfig {
     pub timeout: Duration,
     /// Viewport size as `(width, height)` in logical pixels (default: `1280 x 720`).
     pub viewport: (u32, u32),
+    /// Explicit Chrome/Chromium executable path or command name.
+    ///
+    /// If unset, `Browser::launch_chrome()` first checks the `CHROME_PATH`
+    /// environment variable and then falls back to common Chrome/Chromium
+    /// installation locations.
+    pub chrome_path: Option<String>,
     /// Additional Chrome command-line arguments appended after the built-in flags.
     pub args: Vec<String>,
 }
@@ -56,6 +62,7 @@ impl Default for BrowserConfig {
             headless: true,
             timeout: Duration::from_secs(30),
             viewport: (1280, 720),
+            chrome_path: None,
             args: Vec::new(),
         }
     }
@@ -86,6 +93,7 @@ pub struct Browser {
 
 impl Browser {
     fn find_chrome() -> Option<String> {
+        static CHROME_PATH_CACHE: OnceLock<Option<String>> = OnceLock::new();
         let candidates = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -95,21 +103,55 @@ impl Browser {
             "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
             "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
         ];
-        for candidate in candidates {
-            if std::path::Path::new(candidate).exists() || which::which(candidate).is_ok() {
-                return Some(candidate.to_string());
-            }
-        }
-        None
+        CHROME_PATH_CACHE
+            .get_or_init(|| {
+                for candidate in candidates {
+                    if Self::chrome_exists(candidate) {
+                        return Some(candidate.to_string());
+                    }
+                }
+                None
+            })
+            .clone()
     }
 
-    /// Pick a free TCP port on localhost.
-    fn free_port() -> Result<u16> {
-        TcpListener::bind("127.0.0.1:0")
-            .map(|l| l.local_addr().unwrap().port())
-            .map_err(|e| {
-                BrowserError::BrowserNotLaunched(format!("Could not find a free port: {e}"))
-            })
+    fn chrome_exists(candidate: &str) -> bool {
+        std::path::Path::new(candidate).exists() || which::which(candidate).is_ok()
+    }
+
+    fn resolve_chrome_path(config: &BrowserConfig) -> Result<String> {
+        if let Some(path) = config.chrome_path.as_deref() {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Err(BrowserError::BrowserNotLaunched(
+                    "BrowserConfig.chrome_path was set but empty".to_string(),
+                ));
+            }
+            if Self::chrome_exists(trimmed) {
+                return Ok(trimmed.to_string());
+            }
+            return Err(BrowserError::BrowserNotLaunched(format!(
+                "Chrome/Chromium not found at BrowserConfig.chrome_path='{trimmed}'"
+            )));
+        }
+
+        if let Ok(path) = std::env::var("CHROME_PATH") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                if Self::chrome_exists(trimmed) {
+                    return Ok(trimmed.to_string());
+                }
+                return Err(BrowserError::BrowserNotLaunched(format!(
+                    "Chrome/Chromium not found at CHROME_PATH='{trimmed}'"
+                )));
+            }
+        }
+
+        Self::find_chrome().ok_or_else(|| {
+            BrowserError::BrowserNotLaunched(
+                "Chrome/Chromium not found. Install Google Chrome, set CHROME_PATH, or set BrowserConfig.chrome_path.".to_string(),
+            )
+        })
     }
 
     /// Launch Chrome/Chromium and connect to it automatically.
@@ -135,24 +177,44 @@ impl Browser {
         let _enter = span.enter();
         let config = config.unwrap_or_default();
 
-        let chrome_path = Self::find_chrome().ok_or_else(|| {
-            BrowserError::BrowserNotLaunched(
-                "Chrome/Chromium not found. Install Google Chrome or set a custom path via BrowserConfig::args.".to_string(),
-            )
-        })?;
+        let chrome_path = Self::resolve_chrome_path(&config)?;
 
-        // Use a dynamically-assigned free port so multiple instances never conflict
-        let port = Self::free_port()?;
-
-        let mut chrome_args: Vec<String> = vec![
-            format!("--remote-debugging-port={port}"),
+        let mut chrome_args = vec![
+            "--remote-debugging-port=0".to_string(),
             "--no-sandbox".to_string(),
             "--disable-gpu".to_string(),
+            "--disable-background-networking".to_string(),
             "--disable-dev-shm-usage".to_string(),
+            "--disable-breakpad".to_string(),
+            "--disable-component-extensions-with-background-pages".to_string(),
+            "--disable-component-update".to_string(),
+            "--disable-default-apps".to_string(),
+            "--disable-extensions".to_string(),
+            // Without these, background tabs (anything not foreground) get
+            // their timers and rAF callbacks throttled or paused. That breaks
+            // composite NetworkIdle's rAF flush whenever multiple pages run
+            // concurrently — the flush awaits a rAF tick that may never fire
+            // on a backgrounded tab. Standard practice across Puppeteer /
+            // Playwright; safe for automation use cases.
+            "--disable-background-timer-throttling".to_string(),
+            "--disable-renderer-backgrounding".to_string(),
+            "--disable-backgrounding-occluded-windows".to_string(),
+            "--disable-search-engine-choice-screen".to_string(),
+            "--disable-sync".to_string(),
+            "--enable-automation".to_string(),
+            "--metrics-recording-only".to_string(),
+            "--no-default-browser-check".to_string(),
+            "--no-first-run".to_string(),
+            "--password-store=basic".to_string(),
+            "--use-mock-keychain".to_string(),
             format!("--window-size={},{}", config.viewport.0, config.viewport.1),
         ];
         if config.headless {
-            chrome_args.push("--headless=new".to_string());
+            chrome_args.extend(
+                ["--headless=new", "--hide-scrollbars", "--mute-audio"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
         }
         chrome_args.extend(config.args.iter().cloned());
 
@@ -378,6 +440,7 @@ mod tests {
         assert!(cfg.headless);
         assert_eq!(cfg.viewport, (1280, 720));
         assert_eq!(cfg.timeout, Duration::from_secs(30));
+        assert_eq!(cfg.chrome_path, None);
         assert!(cfg.args.is_empty());
     }
 
@@ -387,17 +450,13 @@ mod tests {
             headless: false,
             timeout: Duration::from_secs(60),
             viewport: (1920, 1080),
+            chrome_path: Some("/usr/bin/chromium".to_string()),
             args: vec!["--disable-extensions".to_string()],
         };
         assert!(!cfg.headless);
         assert_eq!(cfg.viewport, (1920, 1080));
         assert_eq!(cfg.timeout, Duration::from_secs(60));
+        assert_eq!(cfg.chrome_path.as_deref(), Some("/usr/bin/chromium"));
         assert_eq!(cfg.args, vec!["--disable-extensions"]);
-    }
-
-    #[test]
-    fn test_free_port() {
-        let port = Browser::free_port().unwrap();
-        assert!(port > 1024);
     }
 }
