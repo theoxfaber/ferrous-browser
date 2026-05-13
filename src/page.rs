@@ -1,6 +1,8 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use tracing::Instrument;
@@ -133,6 +135,22 @@ impl Locator {
             .await
     }
 
+    /// Wait for the element to become actionable (attached, not disabled,
+    /// visible, non-zero size) and then click it. The entire wait + click
+    /// happens inside the page in one CDP round-trip, driven by a
+    /// MutationObserver, so reaction latency is bounded by the
+    /// attribute/childList mutation rather than by a polling cadence.
+    pub async fn click_auto(&self) -> Result<()> {
+        self.click_auto_with_timeout(Duration::from_secs(30)).await
+    }
+
+    /// [`Locator::click_auto`] with a custom timeout.
+    pub async fn click_auto_with_timeout(&self, dur: Duration) -> Result<()> {
+        self.page
+            .click_selector_auto_wait(&self.selector, dur)
+            .await
+    }
+
     /// Get the inner text of the element.
     pub async fn inner_text(&self) -> Result<String> {
         let expr = format!(
@@ -215,10 +233,50 @@ pub struct Page {
     /// Reference to CDP client
     cdp: Arc<CDPClient>,
     /// Lazily-enabled Page domain: the first `goto` (or anything else that
-    /// needs Page events) drives the one-time `Page.enable` round-trip; any
-    /// concurrent callers wait on it; subsequent callers see it already
-    /// resolved and pay nothing. Clones of a `Page` share this state via Arc.
-    page_enabled: Arc<tokio::sync::OnceCell<()>>,
+    /// needs Page events) performs the one-time `Page.enable` round-trip.
+    /// Unlike a plain OnceCell, failures are not cached forever: a transient
+    /// CDP hiccup leaves the page retryable on the next call.
+    page_enabled: Arc<InitGuard>,
+    /// Same retryable-init pattern for `Network.enable`. Today this is only
+    /// needed by the composite NetworkIdle implementation.
+    network_enabled: Arc<InitGuard>,
+    /// One-shot install of the document_start setTimeout/clearTimeout wrapper
+    /// so the composite NetworkIdle signal can wait on the pending-timers
+    /// counter as well as network in-flight count.
+    timer_script_injected: Arc<InitGuard>,
+}
+
+struct InitGuard {
+    ready: AtomicBool,
+    lock: tokio::sync::Mutex<()>,
+}
+
+impl InitGuard {
+    fn new() -> Self {
+        Self {
+            ready: AtomicBool::new(false),
+            lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    async fn ensure<F, Fut>(&self, init: F) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        if self.ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let _guard = self.lock.lock().await;
+        if self.ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        init().await?;
+        self.ready.store(true, Ordering::Release);
+        Ok(())
+    }
 }
 
 impl Page {
@@ -229,31 +287,110 @@ impl Page {
             target_id,
             session_id,
             cdp,
-            page_enabled: Arc::new(tokio::sync::OnceCell::new()),
+            page_enabled: Arc::new(InitGuard::new()),
+            network_enabled: Arc::new(InitGuard::new()),
+            timer_script_injected: Arc::new(InitGuard::new()),
         }
     }
 
     /// Ensure the Page domain is enabled on this session. Cheap on every
-    /// call after the first: once `get_or_init` resolves, subsequent calls
-    /// return synchronously from the OnceCell without locking or awaiting.
-    ///
-    /// `Page.enable` only needs to fire once per session (the events it
-    /// unlocks are sticky), so cache completion in a OnceCell. Concurrent
-    /// first-callers cooperate; later callers pay nothing.
-    async fn ensure_page_enabled(&self) {
+    /// call after the first: once the init succeeds, subsequent callers
+    /// return synchronously. Failed attempts do not poison the page.
+    async fn ensure_page_enabled(&self) -> Result<()> {
         let cdp = self.cdp.clone();
         let sid = self.session_id.clone();
         self.page_enabled
-            .get_or_init(|| async move {
-                // Swallow the error: a failed Page.enable surfaces later as a
-                // clearer navigation timeout, and turning a transient Chrome
-                // hiccup at session init into a permanent failure for this
-                // Page is worse than a deferred error.
-                let _ = cdp
-                    .send_command_with_session(&sid, "Page.enable".to_string(), None)
-                    .await;
+            .ensure(move || async move {
+                cdp.send_command_with_session(&sid, "Page.enable".to_string(), None)
+                    .await
+                    .map(|_| ())
             })
-            .await;
+            .await?;
+        Ok(())
+    }
+
+    /// Same retryable-init pattern for `Network.enable` so subsequent
+    /// `WaitUntil::NetworkIdle` calls don't re-pay the round-trip.
+    async fn ensure_network_enabled(&self) -> Result<()> {
+        let cdp = self.cdp.clone();
+        let sid = self.session_id.clone();
+        self.network_enabled
+            .ensure(move || async move {
+                cdp.send_command_with_session(&sid, "Network.enable".to_string(), None)
+                    .await
+                    .map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Install a document_start wrapper around `setTimeout`/`clearTimeout`
+    /// that maintains `window.__ferrousPending` (an integer count of
+    /// scheduled-but-not-yet-fired timers) and `window.__ferrousAwaitTimers`
+    /// (a Promise that resolves the next moment the pending count hits 0).
+    /// The composite NetworkIdle flush awaits both an animation frame and
+    /// this Promise, so a `setTimeout(fetch, 250)` correctly defers idle
+    /// until after the timer fires AND its scheduled fetch lands. The
+    /// wrapper is only meaningful on documents created *after* it is
+    /// installed; `Page.addScriptToEvaluateOnNewDocument` ensures that.
+    async fn ensure_timer_script_injected(&self) -> Result<()> {
+        let cdp = self.cdp.clone();
+        let sid = self.session_id.clone();
+        self.timer_script_injected
+            .ensure(move || async move {
+                let script = r#"(() => {
+  if (window.__ferrousInstrumented) return;
+  try {
+    Object.defineProperty(window, '__ferrousInstrumented', { value: true });
+  } catch (e) { return; }
+  let pending = 0;
+  let resolvers = [];
+  Object.defineProperty(window, '__ferrousPending', { get: () => pending });
+  window.__ferrousAwaitTimers = () =>
+    pending === 0 ? Promise.resolve() : new Promise(r => resolvers.push(r));
+  const drain = () => {
+    if (pending === 0 && resolvers.length) {
+      const r = resolvers; resolvers = [];
+      for (const fn of r) { try { fn(); } catch (e) {} }
+    }
+  };
+  const origST = window.setTimeout;
+  const origCT = window.clearTimeout;
+  // Expose the original (unwrapped) setTimeout so internal infrastructure
+  // — like the composite NetworkIdle flush — can schedule timers without
+  // bumping the user-visible pending counter.
+  window.__ferrousRawSetTimeout = origST;
+  const active = new Set();
+  window.setTimeout = function(fn) {
+    const delay = arguments[1];
+    const args = Array.prototype.slice.call(arguments, 2);
+    pending++;
+    let id;
+    const wrapped = function() {
+      active.delete(id);
+      pending--;
+      try { if (typeof fn === 'function') fn.apply(this, args); }
+      finally { drain(); }
+    };
+    id = origST(wrapped, delay);
+    active.add(id);
+    return id;
+  };
+  window.clearTimeout = function(id) {
+    if (active.has(id)) { active.delete(id); pending--; drain(); }
+    return origCT(id);
+  };
+})();"#;
+                cdp.send_command_with_session(
+                    &sid,
+                    "Page.addScriptToEvaluateOnNewDocument".to_string(),
+                    Some(json!({ "source": script })),
+                )
+                .await
+                .map(|_| ())
+            })
+            .await?;
+        Ok(())
     }
 
     // ─── P3: Locator entry point ──────────────────────────────────────────
@@ -322,9 +459,13 @@ impl Page {
         // ─────────────────────────────────────────────────────────────────────
 
         // First goto on this page also enables Page domain events. All
-        // concurrent gotos on the same Page cooperate via OnceCell rather
-        // than each sending their own Page.enable.
-        self.ensure_page_enabled().await;
+        // concurrent gotos on the same Page cooperate via the shared init
+        // guard rather than each sending their own Page.enable.
+        self.ensure_page_enabled().await?;
+        if matches!(wait_until, WaitUntil::NetworkIdle) {
+            self.ensure_network_enabled().await?;
+            self.ensure_timer_script_injected().await?;
+        }
 
         let response = self
             .send_command("Page.navigate".to_string(), Some(json!({ "url": url })))
@@ -334,47 +475,222 @@ impl Page {
             return Err(BrowserError::navigation_failed(&url_owned, error_text));
         }
 
+        let cdp_for_flush = self.cdp.clone();
+
+        // Subscribe to the disconnect signal *before* entering the wait
+        // loop so we never miss a transition. The wait paths below select
+        // on `disconnect_rx.changed()` so a dropped Browser surfaces as a
+        // websocket error within ms rather than waiting out the 30 s
+        // outer timeout. (RecvError::Closed on the event broadcast isn't
+        // sufficient — Pages keep CDPClient alive, so the broadcast
+        // sender doesn't drop just because Chrome exited.)
+        let mut disconnect_rx = self.cdp.disconnected();
+        if *disconnect_rx.borrow_and_update() {
+            return Err(BrowserError::websocket(
+                "goto",
+                "CDP connection already closed",
+            ));
+        }
+
         let wait_result = timeout(Duration::from_secs(TIMEOUT_SECS), async {
             match wait_until {
                 WaitUntil::NetworkIdle => {
-                    let mut last_activity = tokio::time::Instant::now();
-                    loop {
-                        tokio::select! {
-                            recv = event_rx.recv() => {
-                                match recv {
-                                    Ok(msg)
-                                        if msg.session_id.as_deref() == Some(&session_id) =>
-                                    {
-                                        last_activity = tokio::time::Instant::now();
-                                    }
-                                    Ok(_) => {} // different session
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                        last_activity = tokio::time::Instant::now();
-                                    }
-                                    Err(_) => {}
+                    use std::collections::HashSet;
+                    // Composite signal: load fired ∧ in-flight==0 ∧
+                    // (microtask queue drained + 1 rAF) ∧ in-flight still 0.
+                    let mut in_flight: HashSet<String> = HashSet::new();
+                    let mut load_fired = false;
+                    let sid = session_id.clone();
+
+                    let update = |msg: &crate::cdp::CDPMessage,
+                                  load_fired: &mut bool,
+                                  in_flight: &mut HashSet<String>| {
+                        match msg.method.as_deref() {
+                            Some("Network.requestWillBeSent") => {
+                                let Some(params) = msg.params.as_ref() else {
+                                    return;
+                                };
+                                // EventSource streams open a regular HTTP
+                                // request that never receives a
+                                // `Network.loadingFinished` until the
+                                // connection closes. Counting them here
+                                // would pin the in-flight counter for the
+                                // page's lifetime and hang every
+                                // `goto(NetworkIdle)` to the outer 30 s
+                                // timeout. Skip them — users who want to
+                                // wait for SSE traffic specifically can
+                                // use `wait_for_function` on their own
+                                // signal. WebSocket needs no such filter;
+                                // Chrome emits `Network.webSocketCreated`
+                                // for it, not `requestWillBeSent`.
+                                let rtype = params
+                                    .get("type")
+                                    .and_then(|v| v.as_str());
+                                if rtype == Some("EventSource") {
+                                    return;
+                                }
+                                if let Some(id) = params
+                                    .get("requestId")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    in_flight.insert(id.to_string());
                                 }
                             }
-                            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                                if last_activity.elapsed() >= Duration::from_millis(500) {
-                                    return Ok::<(), BrowserError>(());
+                            Some("Network.loadingFinished")
+                            | Some("Network.loadingFailed") => {
+                                if let Some(id) = msg
+                                    .params
+                                    .as_ref()
+                                    .and_then(|p| p.get("requestId"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    in_flight.remove(id);
+                                }
+                            }
+                            Some("Page.loadEventFired") => {
+                                *load_fired = true;
+                            }
+                            _ => {}
+                        }
+                    };
+
+                    'outer: loop {
+                        // Drain events until both conditions hold.
+                        while !(load_fired && in_flight.is_empty()) {
+                            tokio::select! {
+                                _ = disconnect_rx.changed() => {
+                                    return Err(BrowserError::websocket(
+                                        "goto/NetworkIdle composite wait",
+                                        "CDP connection closed",
+                                    ));
+                                }
+                                recv = event_rx.recv() => {
+                                    match recv {
+                                        Ok(msg)
+                                            if msg.session_id.as_deref() == Some(&sid) =>
+                                        {
+                                            update(&msg, &mut load_fired, &mut in_flight);
+                                        }
+                                        Ok(_) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            return Err(BrowserError::websocket(
+                                                "goto/NetworkIdle composite wait",
+                                                "CDP event stream closed",
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Force one rAF tick (which also flushes microtasks
+                        // queued before it). Listen for new Network events
+                        // concurrently — if anything appears during the flush,
+                        // loop back rather than declaring idle.
+                        // rAF flush + drain pending timers (instrumented by
+                        // the document_start wrapper). If the wrapper isn't
+                        // installed (e.g. injection failed) we fall back to
+                        // a single rAF, matching C5 behaviour.
+                        let flush_fut = cdp_for_flush.send_command_with_session(
+                            &sid,
+                            "Runtime.evaluate".to_string(),
+                            Some(json!({
+                                "expression": r#"(async () => {
+    // Race rAF against a raw setTimeout(50). In headless Chrome a
+    // backgrounded tab's rAF callbacks can be throttled or paused
+    // entirely — without the fallback this Promise would never resolve.
+    // We use the unwrapped setTimeout (__ferrousRawSetTimeout) so the
+    // fallback doesn't bump the pending-timer counter.
+    const rawST = window.__ferrousRawSetTimeout || window.setTimeout;
+    await new Promise(r => {
+        let done = false;
+        const once = () => { if (!done) { done = true; r(); } };
+        requestAnimationFrame(once);
+        rawST.call(window, once, 50);
+    });
+    if (typeof window.__ferrousAwaitTimers === 'function') {
+        while (window.__ferrousPending > 0) {
+            await window.__ferrousAwaitTimers();
+            await new Promise(r => {
+                let done = false;
+                const once = () => { if (!done) { done = true; r(); } };
+                requestAnimationFrame(once);
+                rawST.call(window, once, 50);
+            });
+        }
+    }
+    return true;
+})()"#,
+                                "awaitPromise": true,
+                                "returnByValue": true,
+                            })),
+                        );
+                        tokio::pin!(flush_fut);
+
+                        loop {
+                            tokio::select! {
+                                _ = disconnect_rx.changed() => {
+                                    return Err(BrowserError::websocket(
+                                        "goto/NetworkIdle composite flush",
+                                        "CDP connection closed",
+                                    ));
+                                }
+                                _ = &mut flush_fut => {
+                                    if load_fired && in_flight.is_empty() {
+                                        return Ok::<(), BrowserError>(());
+                                    }
+                                    continue 'outer;
+                                }
+                                recv = event_rx.recv() => {
+                                    match recv {
+                                        Ok(msg)
+                                            if msg.session_id.as_deref() == Some(&sid) =>
+                                        {
+                                            update(&msg, &mut load_fired, &mut in_flight);
+                                        }
+                                        Ok(_) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            return Err(BrowserError::websocket(
+                                                "goto/NetworkIdle composite flush",
+                                                "CDP event stream closed",
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 _ => loop {
-                    match event_rx.recv().await {
-                        Ok(msg)
-                            if msg.method.as_deref() == Some(event_method)
-                                && msg.session_id.as_deref() == Some(&session_id) =>
-                        {
-                            return Ok(());
+                    tokio::select! {
+                        _ = disconnect_rx.changed() => {
+                            return Err(BrowserError::websocket(
+                                "goto wait",
+                                "CDP connection closed",
+                            ));
                         }
-                        Ok(_) => {} // wrong session or wrong event
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            return Ok(()); // assume fired
+                        recv = event_rx.recv() => {
+                            match recv {
+                                Ok(msg)
+                                    if msg.method.as_deref() == Some(event_method)
+                                        && msg.session_id.as_deref() == Some(&session_id) =>
+                                {
+                                    return Ok(());
+                                }
+                                Ok(_) => {} // wrong session or wrong event
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    return Ok(()); // assume fired
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return Err(BrowserError::websocket(
+                                        "goto wait",
+                                        "CDP event stream closed",
+                                    ));
+                                }
+                            }
                         }
-                        Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
                     }
                 },
             }
@@ -563,6 +879,159 @@ impl Page {
         } else {
             Err(BrowserError::timeout(
                 format!("waiting for selector '{selector}'"),
+                dur.as_secs(),
+            ))
+        }
+    }
+
+    /// Wait until a JavaScript expression evaluates truthy.
+    ///
+    /// The predicate runs inside the page and re-checks on the next
+    /// animation frame, with a raw `setTimeout` fallback when rAF is
+    /// throttled or paused in a backgrounded page. Resolves to `Ok(())`
+    /// on truthy or `BrowserError::Timeout` on expiry. JS exceptions from
+    /// the predicate surface as `BrowserError::CommandFailed`.
+    pub async fn wait_for_function(&self, expr: &str, dur: Duration) -> Result<()> {
+        let timeout_ms = dur.as_millis() as u64;
+        // Wrap the predicate body in an arrow so the result of `expr` is
+        // returned even when it's a bare expression. We swallow user
+        // exceptions and surface them via Promise.reject so the outer
+        // awaitPromise:true exception path catches them uniformly.
+        let js = format!(
+            r#"new Promise((resolve, reject) => {{
+                const start = performance.now();
+                const timeoutMs = {timeout_ms};
+                const predicate = () => ({expr});
+                const rawST = window.__ferrousRawSetTimeout || window.setTimeout;
+                const check = () => {{
+                    let result;
+                    try {{
+                        result = predicate();
+                    }} catch (e) {{
+                        reject(e); return;
+                    }}
+                    if (result) {{ resolve(true); return; }}
+                    if (performance.now() - start >= timeoutMs) {{
+                        resolve(false); return;
+                    }}
+                    let done = false;
+                    const again = () => {{
+                        if (!done) {{
+                            done = true;
+                            check();
+                        }}
+                    }};
+                    requestAnimationFrame(again);
+                    rawST.call(window, again, Math.min(50, timeoutMs));
+                }};
+                check();
+            }})"#
+        );
+        let result = self
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({
+                    "expression": js,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await?;
+        if let Some(exc) = result.get("exceptionDetails") {
+            let msg = exc
+                .get("exception")
+                .and_then(|e| e.get("description"))
+                .and_then(|d| d.as_str())
+                .unwrap_or("predicate threw");
+            return Err(BrowserError::command_failed("wait_for_function", msg));
+        }
+        let truthy = result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if truthy {
+            Ok(())
+        } else {
+            Err(BrowserError::timeout(
+                format!("wait_for_function('{expr}')"),
+                dur.as_secs(),
+            ))
+        }
+    }
+
+    /// Wait for `selector` to match an actionable element (attached, not
+    /// disabled, visible, non-zero box) then dispatch a click. Implemented
+    /// as one in-page Promise so reaction latency is one microtask after
+    /// the blocking mutation — no Rust-side polling.
+    pub(crate) async fn click_selector_auto_wait(
+        &self,
+        selector: &str,
+        dur: Duration,
+    ) -> Result<()> {
+        let timeout_ms = dur.as_millis() as u64;
+        let sel_lit = serde_json::to_string(selector).expect("selector is valid utf-8");
+        let js = format!(
+            r#"new Promise((resolve) => {{
+                const sel = {sel_lit};
+                const timeoutMs = {timeout_ms};
+                function pick() {{
+                    const el = document.querySelector(sel);
+                    if (!el || !el.isConnected) return null;
+                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
+                    const style = getComputedStyle(el);
+                    if (style.visibility === 'hidden' || style.display === 'none') return null;
+                    if (parseFloat(style.opacity || '1') === 0) return null;
+                    const r = el.getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) return null;
+                    return el;
+                }}
+                let settled = false;
+                let mo = null;
+                let timer = null;
+                function settle(v) {{
+                    if (settled) return;
+                    settled = true;
+                    if (mo) mo.disconnect();
+                    if (timer !== null) clearTimeout(timer);
+                    resolve(v);
+                }}
+                function tryAct() {{
+                    const el = pick();
+                    if (el) {{
+                        el.click();
+                        settle(true);
+                    }}
+                }}
+                tryAct();
+                if (settled) return;
+                mo = new MutationObserver(() => tryAct());
+                mo.observe(document, {{
+                    childList: true, subtree: true, attributes: true
+                }});
+                timer = setTimeout(() => settle(false), timeoutMs);
+            }})"#
+        );
+        let result = self
+            .send_command(
+                "Runtime.evaluate".to_string(),
+                Some(json!({
+                    "expression": js,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await?;
+        let ok = result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if ok {
+            Ok(())
+        } else {
+            Err(BrowserError::timeout(
+                format!("click_auto('{selector}')"),
                 dur.as_secs(),
             ))
         }

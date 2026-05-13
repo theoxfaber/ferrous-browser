@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::Instrument;
@@ -135,19 +135,37 @@ pub struct CDPClient {
     /// Sender side of the writer-task mailbox. `None` until `set_writer` is
     /// called from `Browser::connect_internal`.
     ws_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Message>>>>,
+    /// Latched "is the CDP connection dead?" signal. Transitions false→true
+    /// exactly once when `fail_all_pending` is called from
+    /// `Connection::run`'s termination. Long-running wait loops in
+    /// `Page::goto` watch this so they can return a disconnect error
+    /// promptly instead of hanging on a broadcast channel that never sees
+    /// new events but also never closes (CDPClient is kept alive by all
+    /// Pages holding Arc clones, even after the underlying WebSocket is
+    /// gone — so `RecvError::Closed` on its own is not a reliable signal).
+    disconnected_tx: watch::Sender<bool>,
 }
 
 impl CDPClient {
     /// Create a new CDP client
     pub fn new(ws_url: String) -> Self {
         let (event_broadcast, _) = broadcast::channel(1024);
+        let (disconnected_tx, _) = watch::channel(false);
         Self {
             ws_url,
             message_id_counter: Arc::new(AtomicU32::new(1)),
             pending_responses: Arc::new(StdMutex::new(HashMap::new())),
             event_broadcast,
             ws_tx: Arc::new(StdMutex::new(None)),
+            disconnected_tx,
         }
+    }
+
+    /// Subscribe to the disconnect signal. Returns a `watch::Receiver<bool>`
+    /// that starts at `false` and transitions to `true` exactly once when
+    /// the CDP connection terminates (see `fail_all_pending`).
+    pub fn disconnected(&self) -> watch::Receiver<bool> {
+        self.disconnected_tx.subscribe()
     }
 
     /// Install the writer-task mailbox. Called once by
@@ -308,6 +326,11 @@ impl CDPClient {
         let count = pending.len();
         pending.clear(); // dropping the senders signals the receivers
         drop(pending);
+        // Latch the disconnect signal so long-running wait loops watching
+        // `disconnected()` can return promptly. We intentionally do this
+        // after the pending-responses drop so any task observing both
+        // sees a consistent "everything is dead" state.
+        let _ = self.disconnected_tx.send(true);
         if count > 0 {
             tracing::warn!(
                 pending_count = count,
