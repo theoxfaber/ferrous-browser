@@ -205,20 +205,81 @@ Listed because each was a real worry going in and the data settled it:
 - **Wrapper resets cleanly per-document** — sequential gotos on the same
   Page don't pollute each other's pending state (`t3_sequential_same_page`).
 
+## 2026-05-13 — consolidated benchmark state
+
+This round was not just "run the benches again." It changed both the product
+surface and the benchmark rig:
+
+1. **All harnesses now use the same Chrome-for-Testing binary** via
+   `CHROME_PATH` / `BrowserConfig.chrome_path`, so the launch numbers are no
+   longer polluted by different browser builds.
+2. **The experimental wait primitives were promoted to normal surface area**:
+   `wait_for_function`, `click_auto`, and the composite `NetworkIdle` path are
+   always on, with retryable page/network/script initialization behind them.
+3. **The public matrix now has two lanes**:
+   hot-path parity (`bench/run_matrix.ts`) and deterministic realistic flows
+   (`bench/run_realistic_matrix.ts`).
+4. **The realistic fixtures are local and adversarial by design**:
+   TodoMVC starts with a visible skeleton and delayed settle signal; Conduit
+   adds delayed boot, seeded login, delayed article hydration, favorite state,
+   and comment posting. Fast-but-early libraries should fail assertions, not
+   just post flattering numbers.
+
+### Current median-of-medians headlines
+
+All numbers below came from `RUNS=3` median-of-medians sweeps on the Linux/CfT
+rig described in the README.
+
+| Metric | ferrous-browser | Closest serious comparison | Why it matters |
+|---|---:|---:|---|
+| `launch_chrome` | 137.3 ms | Playwright 90.4 ms / Puppeteer 161.0 ms | launch is no longer a glaring weakness |
+| `new_page` | 13.6 ms | chromiumoxide 22.1 ms | session attach + one-time enable path is paying off |
+| `wait_for_selector_gap` | 1.0 ms | Puppeteer 3.5 ms / Playwright 113.0 ms | repeated suite tax stays tiny |
+| `networkidle_static` | 19.1 ms | Playwright 503.0 ms / Puppeteer 2016.8 ms | composite idle is in a different behavior class |
+| `click_when_enabled_gap` | 0.4 ms | Puppeteer 28.1 ms / Playwright 38.0 ms | in-page actionability removes polling jitter |
+| `todomvc_full_flow` | 695.1 ms | Puppeteer 766.6 ms | interaction-heavy realistic flow, not a toy microbench |
+| `conduit_auth_article_flow` | 886.4 ms | Puppeteer 964.4 ms | seeded auth/feed/article flow, closer to real E2E shape |
+
+### What changed the benchmark story
+
+- **Launch cost was partly a harness problem.** Earlier ~330 ms ferrous launch
+  numbers were taken before the same-binary pin was enforced consistently across
+  every library. Once that was corrected and the default Chrome flags were
+  tightened for automation, ferrous moved into the same class as the faster
+  libraries instead of looking structurally slow.
+- **The biggest sustained wins are still event-driven waits.** Selector waits,
+  `wait_for_function`, `click_auto`, and composite `NetworkIdle` all improved by
+  pushing waits into the page or binding them to exact CDP events instead of
+  burning time on host-side polling loops.
+- **The realistic lane keeps us honest.** It is now possible to be "fast" in a
+  way that is obviously wrong: screenshot the skeleton, miss the delayed article
+  body, or race the comment post. The TodoMVC and Conduit fixtures make those
+  false wins visible.
+- **The comparison set now separates semantic cost from transport cost.**
+  Puppeteer and Playwright remain serious baselines. chromiumoxide is useful as
+  a Rust-native manual-poll baseline. headless_chrome still completes the flows,
+  but its sync transport and polling semantics put it in a different class.
+
 ## Reproducing
 
 ```bash
+# Public hot-path matrix (3-run median-of-medians)
+env RUNS=3 node bench/run_matrix.ts
+
+# Public realistic-flow matrix (3-run median-of-medians)
+env RUNS=3 node bench/run_realistic_matrix.ts
+
 # Composite NetworkIdle + all wait primitives
 cargo test --release --test composite_idle
 
-# Headline perf numbers (above table)
-cargo run --release --example experiments_bench
+# Single-library parity lane
+cargo run --release --example parity_bench
+
+# Single-library realistic lane
+cargo run --release --example realistic_bench
 
 # Correctness verification (every workload reports expected fetch count)
 cargo run --release --example idle_verify
-
-# Regression check: existing parity bench
-cargo run --release --example parity_bench
 ```
 
 Local diagnostic harness used during development is in

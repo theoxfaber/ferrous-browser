@@ -41,32 +41,50 @@ the wait helper returning. It isolates each library's reaction strategy
 
 ```sh
 # Full median-of-medians matrix (3 runs by default)
-node bench/run_matrix.js
+node bench/run_matrix.ts
+
+# Opt into Bun-backed Puppeteer / Playwright columns as well
+JS_RUNTIMES=node,bun node bench/run_matrix.ts
 
 # ferrous-browser (from the repo root)
 cargo run --release --example parity_bench
 
-# Puppeteer (Node ≥18)
-cd bench/puppeteer && npm install && node bench.js
+# Puppeteer
+cd bench/puppeteer && npm install && node bench.ts
 
-# Playwright (Node ≥18)
-cd bench/playwright && npm install && node bench.js
+# Playwright
+cd bench/playwright && npm install && node bench.ts
 
 # chromiumoxide
-cd bench/chromiumoxide && cargo run --release
+cd bench/chromiumoxide && cargo run --release --bin bench
 
 # headless_chrome
-cd bench/headless_chrome && cargo run --release
+cd bench/headless_chrome && cargo run --release --bin bench
 ```
 
-Each run takes 30–90 seconds depending on the library.
+Node.js v22.18.0+ can run these `.ts` files directly with native type
+stripping. On older Node releases, use `node --experimental-strip-types ...`
+or run the same commands with Bun instead.
+
+Single-harness runs range from tens of seconds to several minutes depending on
+the library. The full `RUNS=3` matrix is materially longer, especially once
+`headless_chrome` is included.
 
 The matrix runner executes every harness `RUNS` times, aggregates the median of
 each run's medians, and prints a Markdown table. Set `RUNS=1` for a quick local
-smoke pass.
+smoke pass. By default the JS libraries run under Node only; set
+`JS_RUNTIMES=node,bun` to add Bun-backed Puppeteer / Playwright columns.
+
+Current status: Bun-backed realistic-flow runs completed for both Puppeteer and
+Playwright, and the parity bench completed for Puppeteer. Playwright's parity
+bench still showed Bun-specific instability in this repo's current setup, so
+Bun remains opt-in rather than the default matrix runtime.
+
+For the realistic-flow scenario lane, see [`realistic/README.md`](realistic/README.md).
 
 ## Results
 
 See the table in the project README under
-[**Benchmarks**](../README.md#benchmarks). Numbers there are
-median-of-medians across 3 independent runs on a single Linux host.
+[**Benchmarks**](../README.md#benchmarks). That section now includes both the
+hot-path matrix and the deterministic realistic-flow matrix. The published
+numbers are median-of-medians across 3 independent runs on a single Linux host.
