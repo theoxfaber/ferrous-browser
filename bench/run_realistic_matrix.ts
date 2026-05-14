@@ -9,6 +9,11 @@ const JS_RUNTIMES = (process.env.JS_RUNTIMES || 'node')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
+const LIVE_INTERNET = /^(1|true|yes)$/i.test(process.env.LIVE_INTERNET || '');
+const HARNESS_FILTER = (process.env.HARNESS_FILTER || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 function tsCommand(script, runtime) {
   if (runtime === 'bun') {
@@ -57,7 +62,12 @@ const HARNESSES = (() => {
     },
   );
 
-  return harnesses;
+  if (!HARNESS_FILTER.length) {
+    return harnesses;
+  }
+
+  const allowed = new Set(HARNESS_FILTER);
+  return harnesses.filter((harness) => allowed.has(harness.name));
 })();
 
 const METRICS = [
@@ -76,7 +86,22 @@ const METRICS = [
   ['rwa_login_ready', 'rwa_login_ready'],
   ['rwa_payment_flow', 'rwa_payment_flow'],
   ['rwa_receipt_settled_screenshot', 'rwa_receipt_settled_screenshot'],
+  ['signalboard_interaction_ready', 'signalboard_interaction_ready'],
+  ['signalboard_visual_settled', 'signalboard_visual_settled'],
+  ['signalboard_network_quiesced', 'signalboard_network_quiesced'],
+  ['signalboard_open_detail_flow', 'signalboard_open_detail_flow'],
+  ['signalboard_detail_settled_screenshot', 'signalboard_detail_settled_screenshot'],
 ];
+
+if (LIVE_INTERNET) {
+  METRICS.push(
+    ['livewire_interaction_ready', 'livewire_interaction_ready'],
+    ['livewire_visual_settled', 'livewire_visual_settled'],
+    ['livewire_network_quiesced', 'livewire_network_quiesced'],
+    ['livewire_open_detail_flow', 'livewire_open_detail_flow'],
+    ['livewire_detail_settled_screenshot', 'livewire_detail_settled_screenshot'],
+  );
+}
 
 function median(xs) {
   const sorted = [...xs].sort((a, b) => a - b);
@@ -90,13 +115,57 @@ function formatCell(metric) {
   return `${metric.median.toFixed(1)} ms`;
 }
 
+function gcd(a, b) {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x;
+}
+
+function harnessRotationStep(length) {
+  if (length <= 1) {
+    return 1;
+  }
+  for (let step = Math.floor(length / 2) + 1; step < length; step += 1) {
+    if (gcd(step, length) === 1) {
+      return step;
+    }
+  }
+  return 1;
+}
+
+function orderedHarnessesForRun(runIndex) {
+  if (!LIVE_INTERNET || HARNESSES.length <= 1) {
+    return HARNESSES;
+  }
+
+  const step = harnessRotationStep(HARNESSES.length);
+  const offset = (runIndex * step) % HARNESSES.length;
+  return HARNESSES.slice(offset).concat(HARNESSES.slice(0, offset));
+}
+
 async function main() {
+  if (!HARNESSES.length) {
+    throw new Error('HARNESS_FILTER excluded every realistic harness');
+  }
+
   const runsByLibrary = {};
 
   for (const harness of HARNESSES) {
     runsByLibrary[harness.name] = [];
-    for (let i = 0; i < RUNS; i++) {
-      console.log(`\n== ${harness.name} realistic run ${i + 1}/${RUNS} ==`);
+  }
+
+  for (let runIndex = 0; runIndex < RUNS; runIndex += 1) {
+    const orderedHarnesses = orderedHarnessesForRun(runIndex);
+    if (LIVE_INTERNET) {
+      console.log(`\n-- live harness order ${runIndex + 1}/${RUNS}: ${orderedHarnesses.map((h) => h.name).join(', ')}`);
+    }
+    for (const harness of orderedHarnesses) {
+      console.log(`\n== ${harness.name} realistic run ${runIndex + 1}/${RUNS} ==`);
       const result = await runCommandWithRetry(harness);
       runsByLibrary[harness.name].push(result);
     }

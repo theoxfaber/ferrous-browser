@@ -18,6 +18,12 @@ fixtures instead of isolated primitives.
 - `rwa`: local file-backed Cypress Real World App-style seeded payment flow
   with delayed login/dashboard transitions, deterministic review/receipt
   states, and a receipt-grade settled screenshot.
+- `signalboard`: deterministic local HTTP dashboard with staged API fan-out,
+  delayed media, background prefetch/audit work, and separate interaction,
+  visual, and network-quiet clocks to make methodology tradeoffs legible.
+- `livewire` (opt-in): local file-backed shell that performs live browser
+  requests directly against public internet endpoints, so the data and media
+  fetches are real remote HTTP instead of localhost fixtures or proxying.
 
 ## Metrics
 
@@ -37,9 +43,26 @@ Every realistic harness reports the same scenario metrics:
 | `rwa_login_ready` | `goto(..., load)` until the seeded login screen is settled |
 | `rwa_payment_flow` | login -> open composer -> draft -> review -> submit payment |
 | `rwa_receipt_settled_screenshot` | payment submit -> receipt settle -> screenshot |
+| `signalboard_interaction_ready` | `goto(..., load)` until the dashboard is usable even though background requests remain |
+| `signalboard_visual_settled` | `goto(..., load)` until hero media and visible panels are screenshot-grade stable |
+| `signalboard_network_quiesced` | `goto(..., load)` until the initial background insight/prefetch burst fully drains |
+| `signalboard_open_detail_flow` | open the target card and wait for the detail panel's content-ready state |
+| `signalboard_detail_settled_screenshot` | detail action -> detail settle -> screenshot |
+| `livewire_interaction_ready` | `goto(..., load)` until the live remote cards/activity make the page usable |
+| `livewire_visual_settled` | `goto(..., load)` until remote images and visible commentary finish settling |
+| `livewire_network_quiesced` | `goto(..., load)` until the background live digest chain drains completely |
+| `livewire_open_detail_flow` | open the target remote card and wait for the live detail content-ready state |
+| `livewire_detail_settled_screenshot` | live detail action -> live detail settle -> screenshot |
 
-All fixtures use `file://` URLs, so every library sees the exact same HTML,
-CSS, and JavaScript without a local server sitting in the middle.
+Most fixtures use `file://` URLs so every library sees the exact same HTML,
+CSS, and JavaScript without a local server sitting in the middle. The
+`signalboard` lane is the deliberate exception: it runs against a deterministic
+local HTTP server because the point of that scenario is to expose the gap
+between interaction readiness, visual settling, and full network quiet.
+`livewire` is the other deliberate exception in spirit: the shell is still a
+local fixture, but every data/image request goes straight from the browser to
+public internet endpoints with cache-busting query params. Keep it opt-in so
+the default suite stays deterministic and polite.
 
 ## Running
 
@@ -61,6 +84,12 @@ JS_RUNTIMES=node,bun node bench/run_realistic_matrix.ts
 # ferrous-browser
 cargo run --release --example realistic_bench
 
+# Opt into the live-internet scenario as well
+LIVE_INTERNET=1 ITERS=1 cargo run --release --example realistic_bench
+
+# Cross-library live-internet smoke
+LIVE_INTERNET=1 ITERS=1 RUNS=1 node bench/run_realistic_matrix.ts
+
 # Puppeteer
 cd bench/puppeteer && node realistic.ts
 
@@ -78,6 +107,11 @@ Set `RUNS=1` for a quick matrix smoke pass, or `ITERS=1` when invoking a
 single harness directly.
 By default the JS libraries run under Node only; set
 `JS_RUNTIMES=node,bun` to add Bun-backed Puppeteer / Playwright columns.
+
+For `LIVE_INTERNET=1`, prefer `RUNS=3` or more. The matrix runner rotates
+harness order between runs so no library is permanently stuck paying the
+coldest DNS/TLS/CDN path, and the aggregate table reports median-of-medians
+across those independent passes.
 
 Current status: the realistic TodoMVC lane is green under Bun for both
 Puppeteer and Playwright. The expanded realistic matrix is still primarily
@@ -101,9 +135,14 @@ coming along, rather than leaving them as vague future categories:
   on a media/search page where firing too early is visually obvious
 - Cypress Real World App-style seeded full-stack app: realistic post-login /
   dashboard / transaction-style flows with stable local test data
+- Signalboard-style network-heavy dashboard: multi-request, media-heavy startup
+  where "user can act", "UI is visually stable", and "the network finally
+  went quiet" are intentionally different moments
+- Livewire-style live internet dashboard: same clock separation, but with real
+  remote HTTP requests leaving the machine instead of deterministic local APIs
 
 ## Results
 
 See [README.md](../../README.md#benchmarks) for the current median-of-medians
-tables. The public benchmark section now includes both the hot-path parity
-matrix and this realistic-flow matrix.
+tables. The public benchmark section now includes the hot-path parity matrix,
+this realistic-flow matrix, and the rotated live-internet matrix.

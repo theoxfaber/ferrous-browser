@@ -166,7 +166,7 @@ page.goto("https://example.com", WaitUntil::Load)
 
 ## Benchmarks
 
-Apples-to-apples, **same Chrome binary** (Chrome for Testing 131.0.6778.204), same machine, same Linux host, headless, warm browser unless noted. The public numbers below are median-of-medians across **3 independent runs**. Bench harnesses for every library live under [`bench/`](bench/); feel free to reproduce.
+Apples-to-apples, **same Chrome binary** (Chrome for Testing 131.0.6778.204), same machine, same Linux host, headless, warm browser unless noted. The public numbers below are median-of-medians across **3 independent runs**. For the opt-in live-internet lane, harness order is also rotated between runs so no library is permanently stuck paying the coldest DNS/TLS/CDN path. Bench harnesses for every library live under [`bench/`](bench/); feel free to reproduce.
 
 ### Hot-path matrix
 
@@ -196,6 +196,20 @@ Deterministic local fixtures, same median-of-medians method:
 | `conduit_auth_article_flow` | **886.4 ms** | 964.4 ms | 1078.1 ms | 1076.5 ms² | 11521.2 ms³ |
 | `conduit_article_settled_screenshot` | 418.1 ms | **337.2 ms** | 436.6 ms | 357.2 ms² | 1629.3 ms³ |
 
+### Live-internet matrix
+
+Opt-in `LIVE_INTERNET=1` lane, using rotated harness order plus median-of-medians across 3 independent runs. These are the numbers to use for real remote-network comparisons because they avoid the fixed-order cold-path bias that otherwise distorts the first library in the matrix.
+
+| Scenario metric | ferrous-browser | Puppeteer | Playwright |
+|----------------|----------------:|----------:|-----------:|
+| `livewire_interaction_ready` | 67.3 ms | 66.4 ms | **65.8 ms** |
+| `livewire_visual_settled` | **231.9 ms** | 265.4 ms | 318.3 ms |
+| `livewire_network_quiesced` | **216.6 ms** | 250.1 ms | 270.6 ms |
+| `livewire_open_detail_flow` | **50.0 ms** | 69.3 ms | 102.6 ms |
+| `livewire_detail_settled_screenshot` | **294.7 ms** | 338.5 ms | 453.4 ms |
+
+These published live-internet rows currently focus on the modern async libraries because they have the clean rotated multi-run checkpoint under this methodology. `chromiumoxide` and `headless_chrome` both have live-lane smoke coverage in-repo, but I am not publishing a full multi-run live table for them until they have the same stable rotated checkpoint.
+
 ¹ *Reaction gap* is the time between an element being inserted into the DOM and `wait_for_selector` returning. This is the cost of polling vs. observing, and the difference users actually feel in real tests. See [Selector waits, in detail](#selector-waits-in-detail) below.
 
 ² chromiumoxide has no first-class `NetworkIdle` wait, no built-in `wait_for_selector`, and its realistic-flow waits in this matrix use a manual `sleep(50 ms)` retry cadence. Those rows are representative of the canonical user pattern, not hidden library magic.
@@ -211,6 +225,7 @@ Deterministic local fixtures, same median-of-medians method:
 - **`wait_for_selector` reaction gap** is the most repeated tax in real test suites. ferrous-browser uses a MutationObserver-backed in-page Promise, so reaction latency is effectively one CDP round-trip instead of a polling cadence.
 - **`wait_for_function`** is now competitive with the Node leaders, and **`click_when_enabled`** is where ferrous-browser's in-page actionability path is most obvious: ~0.4 ms versus tens of milliseconds for the other serious libraries.
 - **The realistic rows are the important sanity check.** On interaction-heavy flows (`todomvc_full_flow`, `conduit_auth_article_flow`), ferrous-browser is the fastest library in the modern set. On screenshot-only rows, Puppeteer still has an edge, which is a useful reminder that screenshot timing is often more Chrome-bound than wait-primitive-bound.
+- **The live-internet rows need stricter methodology than the local fixtures.** Once harness order is rotated and the table is aggregated as median-of-medians, ferrous-browser is effectively tied on first interaction and ahead on the later live clocks (`visual_settled`, `network_quiesced`, detail open, detail screenshot). That is the honest comparison; the earlier fixed-order single-pass picture was not.
 
 ### Selector waits, in detail
 

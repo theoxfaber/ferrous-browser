@@ -4,15 +4,19 @@
 //   node realistic.ts
 //   bun realistic.ts
 const { chromium } = require('playwright');
+const { startSignalboardServer } = require('../realistic/signalboard_server.ts');
 const {
   CHROME_PATH,
   CONDUIT_ARTICLE_SLUG,
   CONDUIT_FLOW_COMMENT,
   ITERS,
+  LIVE_INTERNET,
+  LIVEWIRE_TARGET_ID,
   OPENVERSE_TARGET_ID,
   RWA_AMOUNT,
   RWA_NOTE,
   RWA_RECIPIENT,
+  SIGNALBOARD_TARGET_ID,
   assertActiveFilteredSnapshot,
   assertCompletedSnapshot,
   assertConduitArticleSnapshot,
@@ -20,6 +24,11 @@ const {
   assertConduitLoginSnapshot,
   assertFinalSnapshot,
   assertInitialSnapshot,
+  assertLivewireDetailReadySnapshot,
+  assertLivewireDetailSettledSnapshot,
+  assertLivewireQuietSnapshot,
+  assertLivewireReadySnapshot,
+  assertLivewireSettledSnapshot,
   assertOpenverseDetailSnapshot,
   assertOpenverseFilteredSnapshot,
   assertOpenverseInitialSnapshot,
@@ -27,7 +36,13 @@ const {
   assertRwaLoginSnapshot,
   assertRwaReceiptSnapshot,
   assertRwaReviewSnapshot,
+  assertSignalboardDetailReadySnapshot,
+  assertSignalboardDetailSettledSnapshot,
+  assertSignalboardQuietSnapshot,
+  assertSignalboardReadySnapshot,
+  assertSignalboardSettledSnapshot,
   conduitUrl,
+  livewireUrl,
   openverseUrl,
   printStats,
   rwaUrl,
@@ -44,8 +59,31 @@ async function waitSettled(page) {
   await page.waitForFunction(() => document.body.dataset.uiSettled === 'true', null, { polling: 'raf', timeout: 10000 });
 }
 
+async function waitNetworkQuiet(page) {
+  await page.waitForFunction(() => document.body.dataset.networkQuiet === 'true', null, { polling: 'raf', timeout: 10000 });
+}
+
+async function waitDetailReady(page) {
+  await page.waitForFunction(() => document.body.dataset.detailReady === 'true', null, { polling: 'raf', timeout: 10000 });
+}
+
 async function snapshot(page) {
   return page.evaluate(() => window.__bench.snapshot());
+}
+
+let signalboardRunId = 0;
+let livewireRunId = 0;
+
+function nextSignalboardUrl(base) {
+  const url = new URL(base);
+  url.searchParams.set('run', String(signalboardRunId++));
+  return url.toString();
+}
+
+function nextLivewireUrl(base) {
+  const url = new URL(base);
+  url.searchParams.set('run', String(livewireRunId++));
+  return url.toString();
 }
 
 async function loadInitialState(page, url) {
@@ -74,6 +112,42 @@ async function loadRwaLogin(page, url) {
   await waitReady(page);
   await waitSettled(page);
   assertRwaLoginSnapshot(await snapshot(page));
+}
+
+async function loadSignalboardReady(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitReady(page);
+  assertSignalboardReadySnapshot(await snapshot(page));
+}
+
+async function loadSignalboardSettled(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitSettled(page);
+  assertSignalboardSettledSnapshot(await snapshot(page));
+}
+
+async function loadSignalboardQuiet(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitNetworkQuiet(page);
+  assertSignalboardQuietSnapshot(await snapshot(page));
+}
+
+async function loadLivewireReady(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitReady(page);
+  assertLivewireReadySnapshot(await snapshot(page));
+}
+
+async function loadLivewireSettled(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitSettled(page);
+  assertLivewireSettledSnapshot(await snapshot(page));
+}
+
+async function loadLivewireQuiet(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitNetworkQuiet(page);
+  assertLivewireQuietSnapshot(await snapshot(page));
 }
 
 async function addTodo(page, title) {
@@ -177,7 +251,30 @@ async function rwaSubmitPayment(page) {
   assertRwaReceiptSnapshot(await snapshot(page));
 }
 
+async function signalboardOpenDetail(page) {
+  await page.locator(`.open-detail[data-id="${SIGNALBOARD_TARGET_ID}"]`).click();
+  await waitDetailReady(page);
+  assertSignalboardDetailReadySnapshot(await snapshot(page));
+}
+
+async function signalboardWaitDetailSettled(page) {
+  await waitSettled(page);
+  assertSignalboardDetailSettledSnapshot(await snapshot(page));
+}
+
+async function livewireOpenDetail(page) {
+  await page.locator(`.open-detail[data-id="${LIVEWIRE_TARGET_ID}"]`).click();
+  await waitDetailReady(page);
+  assertLivewireDetailReadySnapshot(await snapshot(page));
+}
+
+async function livewireWaitDetailSettled(page) {
+  await waitSettled(page);
+  assertLivewireDetailSettledSnapshot(await snapshot(page));
+}
+
 (async () => {
+  const signalboardServer = await startSignalboardServer();
   const browser = await chromium.launch({
     headless: true,
     executablePath: CHROME_PATH,
@@ -189,6 +286,8 @@ async function rwaSubmitPayment(page) {
   const conduit = conduitUrl();
   const openverse = openverseUrl();
   const rwa = rwaUrl();
+  const signalboard = signalboardServer.url();
+  const livewire = livewireUrl();
 
   const bootReadySamples = [];
   for (let i = 0; i < ITERS; i++) {
@@ -330,25 +429,139 @@ async function rwaSubmitPayment(page) {
   const rwaReceiptSettledScreenshot = stats(rwaReceiptSettledScreenshotSamples);
   printStats('rwa_receipt_settled_screenshot', rwaReceiptSettledScreenshot);
 
+  const signalboardInteractionReadySamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    signalboardInteractionReadySamples.push(await timed(() => loadSignalboardReady(page, nextSignalboardUrl(signalboard))));
+  }
+  const signalboardInteractionReady = stats(signalboardInteractionReadySamples);
+  printStats('signalboard_interaction_ready', signalboardInteractionReady);
+
+  const signalboardVisualSettledSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    signalboardVisualSettledSamples.push(await timed(() => loadSignalboardSettled(page, nextSignalboardUrl(signalboard))));
+  }
+  const signalboardVisualSettled = stats(signalboardVisualSettledSamples);
+  printStats('signalboard_visual_settled', signalboardVisualSettled);
+
+  const signalboardNetworkQuiescedSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    signalboardNetworkQuiescedSamples.push(await timed(() => loadSignalboardQuiet(page, nextSignalboardUrl(signalboard))));
+  }
+  const signalboardNetworkQuiesced = stats(signalboardNetworkQuiescedSamples);
+  printStats('signalboard_network_quiesced', signalboardNetworkQuiesced);
+
+  const signalboardOpenDetailFlowSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    await loadSignalboardSettled(page, nextSignalboardUrl(signalboard));
+    signalboardOpenDetailFlowSamples.push(await timed(() => signalboardOpenDetail(page)));
+  }
+  const signalboardOpenDetailFlow = stats(signalboardOpenDetailFlowSamples);
+  printStats('signalboard_open_detail_flow', signalboardOpenDetailFlow);
+
+  const signalboardDetailSettledScreenshotSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    await loadSignalboardSettled(page, nextSignalboardUrl(signalboard));
+    signalboardDetailSettledScreenshotSamples.push(await timed(async () => {
+      await signalboardOpenDetail(page);
+      await signalboardWaitDetailSettled(page);
+      const png = await page.screenshot();
+      if (png.length < 15_000) {
+        throw new Error(`unexpectedly small signalboard screenshot: ${png.length} bytes`);
+      }
+    }));
+  }
+  const signalboardDetailSettledScreenshot = stats(signalboardDetailSettledScreenshotSamples);
+  printStats('signalboard_detail_settled_screenshot', signalboardDetailSettledScreenshot);
+
+  let livewireInteractionReady = null;
+  let livewireVisualSettled = null;
+  let livewireNetworkQuiesced = null;
+  let livewireOpenDetailFlow = null;
+  let livewireDetailSettledScreenshot = null;
+
+  if (LIVE_INTERNET) {
+    const livewireInteractionReadySamples = [];
+    for (let i = 0; i < ITERS; i++) {
+      livewireInteractionReadySamples.push(await timed(() => loadLivewireReady(page, nextLivewireUrl(livewire))));
+    }
+    livewireInteractionReady = stats(livewireInteractionReadySamples);
+    printStats('livewire_interaction_ready', livewireInteractionReady);
+
+    const livewireVisualSettledSamples = [];
+    for (let i = 0; i < ITERS; i++) {
+      livewireVisualSettledSamples.push(await timed(() => loadLivewireSettled(page, nextLivewireUrl(livewire))));
+    }
+    livewireVisualSettled = stats(livewireVisualSettledSamples);
+    printStats('livewire_visual_settled', livewireVisualSettled);
+
+    const livewireNetworkQuiescedSamples = [];
+    for (let i = 0; i < ITERS; i++) {
+      livewireNetworkQuiescedSamples.push(await timed(() => loadLivewireQuiet(page, nextLivewireUrl(livewire))));
+    }
+    livewireNetworkQuiesced = stats(livewireNetworkQuiescedSamples);
+    printStats('livewire_network_quiesced', livewireNetworkQuiesced);
+
+    const livewireOpenDetailFlowSamples = [];
+    for (let i = 0; i < ITERS; i++) {
+      await loadLivewireSettled(page, nextLivewireUrl(livewire));
+      livewireOpenDetailFlowSamples.push(await timed(() => livewireOpenDetail(page)));
+    }
+    livewireOpenDetailFlow = stats(livewireOpenDetailFlowSamples);
+    printStats('livewire_open_detail_flow', livewireOpenDetailFlow);
+
+    const livewireDetailSettledScreenshotSamples = [];
+    for (let i = 0; i < ITERS; i++) {
+      await loadLivewireSettled(page, nextLivewireUrl(livewire));
+      livewireDetailSettledScreenshotSamples.push(await timed(async () => {
+        await livewireOpenDetail(page);
+        await livewireWaitDetailSettled(page);
+        const png = await page.screenshot();
+        if (png.length < 15_000) {
+          throw new Error(`unexpectedly small livewire screenshot: ${png.length} bytes`);
+        }
+      }));
+    }
+    livewireDetailSettledScreenshot = stats(livewireDetailSettledScreenshotSamples);
+    printStats('livewire_detail_settled_screenshot', livewireDetailSettledScreenshot);
+  }
+
+  const metrics = {
+    todomvc_boot_ready: todomvcBootReady,
+    todomvc_full_flow: todomvcFullFlow,
+    todomvc_settled_screenshot: todomvcSettledScreenshot,
+    conduit_login_ready: conduitLoginReady,
+    conduit_auth_article_flow: conduitAuthArticleFlow,
+    conduit_article_settled_screenshot: conduitArticleSettledScreenshot,
+    openverse_search_ready: openverseSearchReady,
+    openverse_filter_detail_flow: openverseFilterDetailFlow,
+    openverse_detail_settled_screenshot: openverseDetailSettledScreenshot,
+    rwa_login_ready: rwaLoginReady,
+    rwa_payment_flow: rwaPaymentFlow,
+    rwa_receipt_settled_screenshot: rwaReceiptSettledScreenshot,
+    signalboard_interaction_ready: signalboardInteractionReady,
+    signalboard_visual_settled: signalboardVisualSettled,
+    signalboard_network_quiesced: signalboardNetworkQuiesced,
+    signalboard_open_detail_flow: signalboardOpenDetailFlow,
+    signalboard_detail_settled_screenshot: signalboardDetailSettledScreenshot,
+  };
+
+  if (LIVE_INTERNET) {
+    Object.assign(metrics, {
+      livewire_interaction_ready: livewireInteractionReady,
+      livewire_visual_settled: livewireVisualSettled,
+      livewire_network_quiesced: livewireNetworkQuiesced,
+      livewire_open_detail_flow: livewireOpenDetailFlow,
+      livewire_detail_settled_screenshot: livewireDetailSettledScreenshot,
+    });
+  }
+
   console.log(`RESULTS_JSON ${JSON.stringify({
     library: 'playwright',
     scenario: 'realistic',
-    metrics: {
-      todomvc_boot_ready: todomvcBootReady,
-      todomvc_full_flow: todomvcFullFlow,
-      todomvc_settled_screenshot: todomvcSettledScreenshot,
-      conduit_login_ready: conduitLoginReady,
-      conduit_auth_article_flow: conduitAuthArticleFlow,
-      conduit_article_settled_screenshot: conduitArticleSettledScreenshot,
-      openverse_search_ready: openverseSearchReady,
-      openverse_filter_detail_flow: openverseFilterDetailFlow,
-      openverse_detail_settled_screenshot: openverseDetailSettledScreenshot,
-      rwa_login_ready: rwaLoginReady,
-      rwa_payment_flow: rwaPaymentFlow,
-      rwa_receipt_settled_screenshot: rwaReceiptSettledScreenshot,
-    },
+    metrics,
   })}`);
 
+  await signalboardServer.close();
   await browser.close();
 })().catch((err) => {
   console.error(err);

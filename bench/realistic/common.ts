@@ -4,6 +4,7 @@ const { pathToFileURL } = require('url');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const ITERS = Number(process.env.ITERS || '10');
+const LIVE_INTERNET = /^(1|true|yes)$/i.test(process.env.LIVE_INTERNET || '');
 const CHROME_PATH = process.env.CHROME_PATH
   || `${process.env.HOME}/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome`;
 
@@ -48,6 +49,10 @@ function rwaUrl() {
   return pathToFileURL(path.join(__dirname, 'fixtures', 'rwa', 'index.html')).href;
 }
 
+function livewireUrl() {
+  return pathToFileURL(path.join(__dirname, 'fixtures', 'livewire', 'index.html')).href;
+}
+
 const CONDUIT_ARTICLE_SLUG = 'composite-network-idle';
 const CONDUIT_ARTICLE_TITLE = 'Composite NetworkIdle';
 const CONDUIT_FLOW_COMMENT = 'Benchmark the real flow.';
@@ -57,6 +62,9 @@ const RWA_RECIPIENT = 'Mina Hart';
 const RWA_AMOUNT = '127.45';
 const RWA_NOTE = 'Benchmark seeded payment.';
 const RWA_RECEIPT_ID = 'TX-3020';
+const SIGNALBOARD_TARGET_ID = 'latency-lab';
+const SIGNALBOARD_TARGET_TITLE = 'Latency Lab';
+const LIVEWIRE_TARGET_ID = 11;
 
 function expectArrayEqual(actual, expected, label) {
   if (actual.length !== expected.length) {
@@ -276,11 +284,130 @@ function assertRwaReceiptSnapshot(snapshot) {
   }
 }
 
+function assertSignalboardReadySnapshot(snapshot) {
+  if (!snapshot.ready || snapshot.settled || snapshot.networkQuiet) {
+    throw new Error(`signalboard ready snapshot not in ready-only state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.view !== 'overview' || snapshot.cardsVisible !== 3 || snapshot.alertsVisible !== 2 || snapshot.activityVisible !== 4) {
+    throw new Error(`unexpected signalboard ready view state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.heroImagesLoaded >= 2 || snapshot.targetCardId !== SIGNALBOARD_TARGET_ID || snapshot.targetCardTitle !== SIGNALBOARD_TARGET_TITLE) {
+    throw new Error(`unexpected signalboard ready media state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.pendingRequests <= 0 || snapshot.insightsDone || snapshot.prefetchDone) {
+    throw new Error(`unexpected signalboard ready background state: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertSignalboardSettledSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.networkQuiet) {
+    throw new Error(`signalboard settled snapshot not in visual-settled state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.view !== 'overview' || snapshot.cardsVisible !== 3 || snapshot.heroImagesLoaded !== 2) {
+    throw new Error(`unexpected signalboard settled view state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.pendingRequests <= 0 || snapshot.insightsDone || snapshot.prefetchDone) {
+    throw new Error(`unexpected signalboard settled background state: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertSignalboardQuietSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || !snapshot.networkQuiet) {
+    throw new Error(`signalboard quiet snapshot not fully quiet: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.view !== 'overview' || snapshot.heroImagesLoaded !== 2 || snapshot.pendingRequests !== 0) {
+    throw new Error(`unexpected signalboard quiet media state: ${JSON.stringify(snapshot)}`);
+  }
+  if (!snapshot.insightsDone || !snapshot.prefetchDone) {
+    throw new Error(`unexpected signalboard quiet background state: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertSignalboardDetailReadySnapshot(snapshot) {
+  if (!snapshot.ready || snapshot.settled || snapshot.view !== 'detail' || !snapshot.detailVisible || !snapshot.detailReady) {
+    throw new Error(`signalboard detail snapshot not in ready-only state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.detailId !== SIGNALBOARD_TARGET_ID || snapshot.detailTitle !== SIGNALBOARD_TARGET_TITLE || snapshot.detailOwner !== 'Runtime Operations' || snapshot.detailStageCount !== 3) {
+    throw new Error(`unexpected signalboard detail metadata: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.detailChartLoaded || snapshot.detailAuditDone || snapshot.pendingRequests <= 0) {
+    throw new Error(`unexpected signalboard detail background state: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertSignalboardDetailSettledSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.view !== 'detail' || !snapshot.detailVisible || !snapshot.detailReady) {
+    throw new Error(`signalboard detail snapshot not settled: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.detailId !== SIGNALBOARD_TARGET_ID || snapshot.detailTitle !== SIGNALBOARD_TARGET_TITLE || snapshot.detailOwner !== 'Runtime Operations' || snapshot.detailStageCount !== 3) {
+    throw new Error(`unexpected signalboard detail settled metadata: ${JSON.stringify(snapshot)}`);
+  }
+  if (!snapshot.detailChartLoaded) {
+    throw new Error(`signalboard detail chart not loaded: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertLivewireReadySnapshot(snapshot) {
+  if (!snapshot.ready) {
+    throw new Error(`livewire ready snapshot not ready: ${JSON.stringify(snapshot)}`);
+  }
+  if (!snapshot.profileLoaded || snapshot.view !== 'overview' || snapshot.cardsVisible !== 6 || snapshot.activityVisible !== 4) {
+    throw new Error(`unexpected livewire ready view state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.targetCardId !== LIVEWIRE_TARGET_ID || typeof snapshot.targetCardTitle !== 'string' || snapshot.targetCardTitle.length < 8) {
+    throw new Error(`unexpected livewire ready target metadata: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertLivewireSettledSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled) {
+    throw new Error(`livewire settled snapshot not settled: ${JSON.stringify(snapshot)}`);
+  }
+  if (!snapshot.profileLoaded || snapshot.view !== 'overview' || snapshot.cardsVisible !== 6 || snapshot.alertsVisible !== 3 || snapshot.heroImagesLoaded !== 2) {
+    throw new Error(`unexpected livewire settled view state: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertLivewireQuietSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || !snapshot.networkQuiet) {
+    throw new Error(`livewire quiet snapshot not fully quiet: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.view !== 'overview' || snapshot.heroImagesLoaded !== 2 || snapshot.pendingRequests !== 0) {
+    throw new Error(`unexpected livewire quiet media state: ${JSON.stringify(snapshot)}`);
+  }
+  if (!snapshot.backfillDone || !snapshot.digestDone) {
+    throw new Error(`unexpected livewire quiet background state: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertLivewireDetailReadySnapshot(snapshot) {
+  if (!snapshot.ready || snapshot.view !== 'detail' || !snapshot.detailVisible || !snapshot.detailReady) {
+    throw new Error(`livewire detail snapshot not ready: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.detailId !== LIVEWIRE_TARGET_ID || snapshot.detailTitle !== snapshot.targetCardTitle || typeof snapshot.detailOwner !== 'string' || snapshot.detailOwner.length < 3 || snapshot.detailCommentCount !== 3) {
+    throw new Error(`unexpected livewire detail metadata: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertLivewireDetailSettledSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.view !== 'detail' || !snapshot.detailVisible || !snapshot.detailReady) {
+    throw new Error(`livewire detail snapshot not settled: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.detailId !== LIVEWIRE_TARGET_ID || snapshot.detailTitle !== snapshot.targetCardTitle || typeof snapshot.detailOwner !== 'string' || snapshot.detailOwner.length < 3 || snapshot.detailCommentCount !== 3) {
+    throw new Error(`unexpected livewire detail settled metadata: ${JSON.stringify(snapshot)}`);
+  }
+  if (!snapshot.detailChartLoaded) {
+    throw new Error(`livewire detail chart not loaded: ${JSON.stringify(snapshot)}`);
+  }
+}
+
 module.exports = {
   CHROME_PATH,
   CONDUIT_ARTICLE_SLUG,
   CONDUIT_FLOW_COMMENT,
   ITERS,
+  LIVE_INTERNET,
+  LIVEWIRE_TARGET_ID,
   OPENVERSE_TARGET_ID,
   OPENVERSE_TARGET_TITLE,
   ROOT,
@@ -288,6 +415,8 @@ module.exports = {
   RWA_NOTE,
   RWA_RECEIPT_ID,
   RWA_RECIPIENT,
+  SIGNALBOARD_TARGET_ID,
+  SIGNALBOARD_TARGET_TITLE,
   assertActiveFilteredSnapshot,
   assertCompletedSnapshot,
   assertConduitArticleSnapshot,
@@ -295,6 +424,11 @@ module.exports = {
   assertConduitLoginSnapshot,
   assertFinalSnapshot,
   assertInitialSnapshot,
+  assertLivewireDetailReadySnapshot,
+  assertLivewireDetailSettledSnapshot,
+  assertLivewireQuietSnapshot,
+  assertLivewireReadySnapshot,
+  assertLivewireSettledSnapshot,
   assertOpenverseDetailSnapshot,
   assertOpenverseFilteredSnapshot,
   assertOpenverseInitialSnapshot,
@@ -302,7 +436,13 @@ module.exports = {
   assertRwaLoginSnapshot,
   assertRwaReceiptSnapshot,
   assertRwaReviewSnapshot,
+  assertSignalboardDetailReadySnapshot,
+  assertSignalboardDetailSettledSnapshot,
+  assertSignalboardQuietSnapshot,
+  assertSignalboardReadySnapshot,
+  assertSignalboardSettledSnapshot,
   conduitUrl,
+  livewireUrl,
   openverseUrl,
   printStats,
   rwaUrl,

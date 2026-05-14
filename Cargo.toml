@@ -39,6 +39,7 @@ tracing-chrome = "0.7"
 # Local HTTP fixture for composite_idle integration tests (Tier 2).
 axum = { version = "0.7", features = ["ws"] }
 tokio-stream = "0.1"
+realistic_server = { path = "bench/realistic_server" }
 
 [features]
 default = []

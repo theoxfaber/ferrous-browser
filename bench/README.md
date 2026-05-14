@@ -84,6 +84,10 @@ each run's medians, and prints a Markdown table. Set `RUNS=1` for a quick local
 smoke pass. By default the JS libraries run under Node only; set
 `JS_RUNTIMES=node,bun` to add Bun-backed Puppeteer / Playwright columns.
 
+When the realistic matrix is run with `LIVE_INTERNET=1`, the runner also
+rotates harness order between runs so no library consistently absorbs the
+coldest remote-network path.
+
 Current status: Bun-backed realistic-flow runs completed for both Puppeteer and
 Playwright, and the parity bench completed for Puppeteer. Playwright's parity
 bench still showed Bun-specific instability in this repo's current setup, so
@@ -95,5 +99,6 @@ For the realistic-flow scenario lane, see [`realistic/README.md`](realistic/READ
 
 See the table in the project README under
 [**Benchmarks**](../README.md#benchmarks). That section now includes both the
-hot-path matrix and the deterministic realistic-flow matrix. The published
-numbers are median-of-medians across 3 independent runs on a single Linux host.
+hot-path matrix, the deterministic realistic-flow matrix, and the rotated
+live-internet matrix. The published numbers are median-of-medians across 3
+independent runs on a single Linux host.
