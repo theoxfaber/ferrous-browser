@@ -68,12 +68,17 @@ or run the same commands with Bun instead.
 
 ## Roadmap
 
-The scaffold is intended to grow into a broader scenario matrix:
+The scaffold is intended to grow into a broader scenario matrix.
+The first two bullets below are implemented today. The third and fourth are
+specific next examples that were in mind when this lane was designed, not
+generic category labels:
 
 - TodoMVC: micro-SPA interaction baseline
 - RealWorld / Conduit: auth, routing, CRUD, feed/article flows
-- visual-settling target: screenshot-grade loading correctness
-- seeded full-stack app: realistic post-login/product flows
+- Openverse-style visual-settling target: screenshot-grade loading correctness
+  on a media/search page where firing too early is visually obvious
+- Cypress Real World App-style seeded full-stack app: realistic post-login /
+  dashboard / transaction-style flows with stable local test data
 
 ## Results
 
