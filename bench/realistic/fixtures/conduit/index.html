@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ferrous Conduit Fixture</title>
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body class="is-booting" data-app-ready="false" data-ui-settled="false" data-route="boot">
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Realistic Fixture</p>
+          <h1>Conduit, but fully deterministic.</h1>
+        </div>
+        <div class="status-cluster">
+          <div class="status-chip route-chip">booting</div>
+          <div class="status-chip user-chip">guest</div>
+        </div>
+      </header>
+
+      <section class="boot-shell" aria-live="polite">
+        <div class="pulse-line wide"></div>
+        <div class="pulse-line mid"></div>
+        <div class="pulse-frame"></div>
+      </section>
+
+      <main class="app-shell" hidden>
+        <nav class="topbar">
+          <div>
+            <p class="eyebrow">Scenario Two</p>
+            <h2>Auth, feed, article</h2>
+          </div>
+          <div class="ready-badge">warming up</div>
+        </nav>
+
+        <section class="panel login-view">
+          <div class="panel-copy">
+            <p class="eyebrow">Sign In</p>
+            <h3>Use the seeded account</h3>
+            <p class="deck">
+              The fixture looks like a small SPA, but every transition is local and
+              deterministic so timing differences are library overhead, not backend drift.
+            </p>
+          </div>
+          <div class="login-form">
+            <label class="field">
+              <span>Email</span>
+              <input class="login-email" type="email" value="demo@ferrous.dev">
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input class="login-password" type="password" value="hyperfine">
+            </label>
+            <button class="login-submit" type="button">Sign in</button>
+            <p class="login-error" hidden>Wrong seeded credentials.</p>
+          </div>
+        </section>
+
+        <section class="panel feed-view" hidden>
+          <div class="feed-head">
+            <div>
+              <p class="eyebrow">Global Feed</p>
+              <h3>Articles with real state transitions</h3>
+            </div>
+            <div class="tab-strip">
+              <button class="feed-tab is-active" type="button">Global Feed</button>
+              <button class="feed-tab muted" type="button" disabled>Tag: timing</button>
+            </div>
+          </div>
+          <div class="feed-list" aria-live="polite"></div>
+        </section>
+
+        <section class="panel article-view" hidden>
+          <div class="article-hero">
+            <div>
+              <p class="eyebrow">Article</p>
+              <h3 class="article-title">Loading article</h3>
+              <p class="article-description"></p>
+            </div>
+            <button class="article-favorite" type="button">Favorite</button>
+          </div>
+
+          <div class="article-meta">
+            <p class="article-author"></p>
+            <div class="tag-strip"></div>
+          </div>
+
+          <div class="article-loading" aria-live="polite">
+            <div class="pulse-line wide"></div>
+            <div class="pulse-line mid"></div>
+            <div class="pulse-frame compact"></div>
+          </div>
+
+          <div class="article-body" hidden>
+            <div class="comment-composer">
+              <label class="field grow">
+                <span>Comment</span>
+                <textarea class="article-comment-input" rows="3" placeholder="Add a note"></textarea>
+              </label>
+              <button class="article-comment-submit" type="button">Post Comment</button>
+            </div>
+            <div class="comment-list" aria-live="polite"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      (() => {
+        const BOOT_DELAY_MS = 220;
+        const LOGIN_DELAY_MS = 150;
+        const FAVORITE_DELAY_MS = 45;
+        const ARTICLE_DELAY_MS = 130;
+        const COMMENT_DELAY_MS = 90;
+        const SETTLE_DELAY_MS = 65;
+        const VALID_EMAIL = "demo@ferrous.dev";
+        const VALID_PASSWORD = "hyperfine";
+        const ARTICLE_SLUG = "composite-network-idle";
+
+        const seedArticles = [
+          {
+            slug: "waits-without-polling",
+            title: "Waits without polling",
+            description: "Push the wait into the page and stop paying a 50 ms tax on every state change.",
+            author: "Morgan Lee",
+            favorites: 18,
+            favorited: false,
+            tags: ["timing", "observer"],
+          },
+          {
+            slug: ARTICLE_SLUG,
+            title: "Composite NetworkIdle",
+            description: "Load-event, network drain, timer flush, and then only then call the page settled.",
+            author: "Sana Patel",
+            favorites: 42,
+            favorited: false,
+            tags: ["waits", "networkidle", "cdp"],
+          },
+          {
+            slug: "actionability-without-jitter",
+            title: "Actionability without jitter",
+            description: "Actionability checks should react on mutation, not on a sleepy retry loop.",
+            author: "Riley Chen",
+            favorites: 27,
+            favorited: true,
+            tags: ["clicks", "locator"],
+          },
+        ];
+
+        const seedComments = {
+          "waits-without-polling": [
+            { id: 11, author: "Morgan Lee", body: "Polling is fine until you stack it a hundred times." },
+          ],
+          [ARTICLE_SLUG]: [
+            { id: 21, author: "Sana Patel", body: "The timer flush is the whole trick." },
+            { id: 22, author: "Riley Chen", body: "Load and quiet are not the same thing." },
+          ],
+          "actionability-without-jitter": [
+            { id: 31, author: "Riley Chen", body: "The click should happen when the DOM says yes." },
+          ],
+        };
+
+        const body = document.body;
+        const bootShell = document.querySelector(".boot-shell");
+        const appShell = document.querySelector(".app-shell");
+        const routeChip = document.querySelector(".route-chip");
+        const userChip = document.querySelector(".user-chip");
+        const readyBadge = document.querySelector(".ready-badge");
+
+        const loginView = document.querySelector(".login-view");
+        const loginEmail = document.querySelector(".login-email");
+        const loginPassword = document.querySelector(".login-password");
+        const loginSubmit = document.querySelector(".login-submit");
+        const loginError = document.querySelector(".login-error");
+
+        const feedView = document.querySelector(".feed-view");
+        const feedList = document.querySelector(".feed-list");
+
+        const articleView = document.querySelector(".article-view");
+        const articleTitle = document.querySelector(".article-title");
+        const articleDescription = document.querySelector(".article-description");
+        const articleAuthor = document.querySelector(".article-author");
+        const articleFavorite = document.querySelector(".article-favorite");
+        const articleLoading = document.querySelector(".article-loading");
+        const articleBody = document.querySelector(".article-body");
+        const tagStrip = document.querySelector(".tag-strip");
+        const commentInput = document.querySelector(".article-comment-input");
+        const commentSubmit = document.querySelector(".article-comment-submit");
+        const commentList = document.querySelector(".comment-list");
+
+        const state = {
+          route: "boot",
+          loggedIn: false,
+          loginError: "",
+          selectedSlug: null,
+          articleReady: false,
+          settleToken: 0,
+          pendingRemote: 0,
+          nextCommentId: 100,
+          user: null,
+          articles: seedArticles.map((article) => ({ ...article })),
+          commentsBySlug: JSON.parse(JSON.stringify(seedComments)),
+        };
+
+        function currentArticle() {
+          return state.articles.find((article) => article.slug === state.selectedSlug) || null;
+        }
+
+        function compositeArticle() {
+          return state.articles.find((article) => article.slug === ARTICLE_SLUG);
+        }
+
+        function setSettled(value) {
+          body.dataset.uiSettled = value ? "true" : "false";
+          body.classList.toggle("is-settling", !value);
+          const routeLabel = state.route === "boot" ? "booting" : state.route;
+          readyBadge.textContent = value ? `${routeLabel} settled` : `${routeLabel} syncing`;
+          routeChip.textContent = value ? routeLabel : `${routeLabel}...`;
+        }
+
+        function scheduleSettle() {
+          const token = ++state.settleToken;
+          setSettled(false);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setTimeout(() => {
+                if (token !== state.settleToken || state.pendingRemote > 0) {
+                  return;
+                }
+                setSettled(true);
+              }, SETTLE_DELAY_MS);
+            });
+          });
+        }
+
+        function beginRemoteChange() {
+          state.pendingRemote += 1;
+          setSettled(false);
+        }
+
+        function endRemoteChange() {
+          state.pendingRemote = Math.max(0, state.pendingRemote - 1);
+          render();
+          scheduleSettle();
+        }
+
+        function renderFeed() {
+          feedList.replaceChildren(
+            ...state.articles.map((article) => {
+              const card = document.createElement("article");
+              card.className = "feed-card";
+              card.dataset.slug = article.slug;
+
+              const meta = document.createElement("div");
+              meta.className = "feed-meta";
+
+              const byline = document.createElement("p");
+              byline.className = "feed-byline";
+              byline.textContent = `${article.author} · ${article.tags.join(" / ")}`;
+
+              const title = document.createElement("h4");
+              title.className = "feed-title";
+              title.textContent = article.title;
+
+              const desc = document.createElement("p");
+              desc.className = "feed-desc";
+              desc.textContent = article.description;
+
+              meta.append(byline, title, desc);
+
+              const actions = document.createElement("div");
+              actions.className = "feed-actions";
+
+              const favorite = document.createElement("button");
+              favorite.className = `favorite-button${article.favorited ? " is-active" : ""}`;
+              favorite.type = "button";
+              favorite.dataset.slug = article.slug;
+              favorite.textContent = `${article.favorited ? "Unfavorite" : "Favorite"} · ${article.favorites}`;
+
+              const open = document.createElement("button");
+              open.className = "open-article";
+              open.type = "button";
+              open.dataset.slug = article.slug;
+              open.textContent = "Open Article";
+
+              actions.append(favorite, open);
+              card.append(meta, actions);
+              return card;
+            }),
+          );
+        }
+
+        function renderArticle() {
+          const article = currentArticle();
+          if (!article) {
+            articleTitle.textContent = "Loading article";
+            articleDescription.textContent = "";
+            articleAuthor.textContent = "";
+            articleFavorite.textContent = "Favorite";
+            tagStrip.replaceChildren();
+            commentList.replaceChildren();
+            articleBody.hidden = true;
+            articleLoading.hidden = false;
+            commentInput.value = "";
+            return;
+          }
+
+          articleTitle.textContent = article.title;
+          articleDescription.textContent = article.description;
+          articleAuthor.textContent = `${article.author} · favorited ${article.favorites} times`;
+          articleFavorite.textContent = `${article.favorited ? "Unfavorite" : "Favorite"} · ${article.favorites}`;
+          articleFavorite.classList.toggle("is-active", article.favorited);
+
+          tagStrip.replaceChildren(
+            ...article.tags.map((tag) => {
+              const chip = document.createElement("span");
+              chip.className = "tag-chip";
+              chip.textContent = tag;
+              return chip;
+            }),
+          );
+
+          articleLoading.hidden = state.articleReady;
+          articleBody.hidden = !state.articleReady;
+          commentSubmit.disabled = !state.articleReady;
+
+          if (!state.articleReady) {
+            return;
+          }
+
+          const comments = state.commentsBySlug[article.slug] || [];
+          commentList.replaceChildren(
+            ...comments.map((comment) => {
+              const row = document.createElement("article");
+              row.className = "comment-row";
+
+              const author = document.createElement("p");
+              author.className = "comment-author";
+              author.textContent = comment.author;
+
+              const bodyText = document.createElement("p");
+              bodyText.className = "comment-body";
+              bodyText.textContent = comment.body;
+
+              row.append(author, bodyText);
+              return row;
+            }),
+          );
+        }
+
+        function render() {
+          const ready = body.dataset.appReady === "true";
+          body.dataset.route = state.route;
+          bootShell.hidden = ready;
+          appShell.hidden = !ready;
+
+          loginView.hidden = state.route !== "login";
+          feedView.hidden = state.route !== "feed";
+          articleView.hidden = state.route !== "article";
+          loginError.hidden = !state.loginError;
+          loginError.textContent = state.loginError;
+
+          userChip.textContent = state.user ? state.user.name : "guest";
+          routeChip.textContent = state.route === "boot" ? "booting" : state.route;
+
+          renderFeed();
+          renderArticle();
+        }
+
+        function openArticle(slug) {
+          state.route = "article";
+          state.selectedSlug = slug;
+          state.articleReady = false;
+          render();
+          beginRemoteChange();
+          setTimeout(() => {
+            state.articleReady = true;
+            endRemoteChange();
+          }, ARTICLE_DELAY_MS);
+        }
+
+        loginSubmit.addEventListener("click", () => {
+          state.loginError = "";
+          if (loginEmail.value.trim() !== VALID_EMAIL || loginPassword.value !== VALID_PASSWORD) {
+            state.loginError = "Wrong seeded credentials.";
+            render();
+            scheduleSettle();
+            return;
+          }
+
+          beginRemoteChange();
+          setTimeout(() => {
+            state.loggedIn = true;
+            state.user = { name: "Taylor Faber", handle: "@theox" };
+            state.route = "feed";
+            state.loginError = "";
+            state.selectedSlug = null;
+            state.articleReady = false;
+            endRemoteChange();
+          }, LOGIN_DELAY_MS);
+        });
+
+        feedList.addEventListener("click", (event) => {
+          const favoriteButton = event.target.closest(".favorite-button");
+          if (favoriteButton) {
+            const article = state.articles.find((candidate) => candidate.slug === favoriteButton.dataset.slug);
+            if (!article) {
+              return;
+            }
+            beginRemoteChange();
+            setTimeout(() => {
+              article.favorited = !article.favorited;
+              article.favorites += article.favorited ? 1 : -1;
+              endRemoteChange();
+            }, FAVORITE_DELAY_MS);
+            return;
+          }
+
+          const openButton = event.target.closest(".open-article");
+          if (openButton) {
+            openArticle(openButton.dataset.slug);
+          }
+        });
+
+        articleFavorite.addEventListener("click", () => {
+          const article = currentArticle();
+          if (!article || !state.articleReady) {
+            return;
+          }
+          beginRemoteChange();
+          setTimeout(() => {
+            article.favorited = !article.favorited;
+            article.favorites += article.favorited ? 1 : -1;
+            endRemoteChange();
+          }, FAVORITE_DELAY_MS);
+        });
+
+        commentSubmit.addEventListener("click", () => {
+          const article = currentArticle();
+          const bodyText = commentInput.value.trim();
+          if (!article || !state.articleReady || !bodyText) {
+            return;
+          }
+          beginRemoteChange();
+          setTimeout(() => {
+            state.commentsBySlug[article.slug].unshift({
+              id: state.nextCommentId++,
+              author: state.user.name,
+              body: bodyText,
+            });
+            commentInput.value = "";
+            endRemoteChange();
+          }, COMMENT_DELAY_MS);
+        });
+
+        window.__bench = {
+          fixture: "conduit",
+          isReady: () => body.dataset.appReady === "true",
+          isSettled: () => body.dataset.uiSettled === "true",
+          snapshot: () => {
+            const article = currentArticle();
+            const composite = compositeArticle();
+            return {
+              ready: body.dataset.appReady === "true",
+              settled: body.dataset.uiSettled === "true",
+              route: state.route,
+              loggedIn: state.loggedIn,
+              skeletonVisible: !bootShell.hidden,
+              loginVisible: !loginView.hidden,
+              feedVisible: !feedView.hidden,
+              articleVisible: !articleView.hidden,
+              userName: state.user ? state.user.name : "guest",
+              feedTitles: state.articles.map((candidate) => candidate.title),
+              compositeFavoriteCount: composite ? composite.favorites : 0,
+              compositeFavorited: composite ? composite.favorited : false,
+              selectedSlug: state.selectedSlug,
+              articleTitle: article ? article.title : null,
+              articleReady: state.articleReady,
+              articleTags: article ? article.tags : [],
+              articleCommentBodies: article && state.articleReady
+                ? (state.commentsBySlug[article.slug] || []).map((comment) => comment.body)
+                : [],
+            };
+          },
+        };
+
+        setTimeout(() => {
+          body.dataset.appReady = "true";
+          body.classList.remove("is-booting");
+          body.classList.add("is-ready");
+          state.route = "login";
+          render();
+          scheduleSettle();
+        }, BOOT_DELAY_MS);
+      })();
+    </script>
+  </body>
+</html>

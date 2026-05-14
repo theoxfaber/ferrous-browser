@@ -5,46 +5,68 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const RUNS = Number(process.env.RUNS || '3');
+const JS_RUNTIMES = (process.env.JS_RUNTIMES || 'node')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
-const HARNESSES = [
-  {
-    name: 'ferrous-browser',
-    cwd: ROOT,
-    cmd: ['cargo', 'run', '--release', '--example', 'parity_bench'],
-  },
-  {
-    name: 'puppeteer',
-    cwd: path.join(ROOT, 'bench', 'puppeteer'),
-    cmd: ['node', 'bench.js'],
-  },
-  {
-    name: 'playwright',
-    cwd: path.join(ROOT, 'bench', 'playwright'),
-    cmd: ['node', 'bench.js'],
-  },
-  {
-    name: 'chromiumoxide',
-    cwd: path.join(ROOT, 'bench', 'chromiumoxide'),
-    cmd: ['cargo', 'run', '--release'],
-  },
-  {
-    name: 'headless_chrome',
-    cwd: path.join(ROOT, 'bench', 'headless_chrome'),
-    cmd: ['cargo', 'run', '--release'],
-  },
-];
+function tsCommand(script, runtime) {
+  if (runtime === 'bun') {
+    return ['bun', script];
+  }
+
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  if (major > 22 || (major === 22 && minor >= 18)) {
+    return ['node', script];
+  }
+  return ['node', '--experimental-strip-types', script];
+}
+
+const HARNESSES = (() => {
+  const harnesses = [
+    {
+      name: 'ferrous-browser',
+      cwd: ROOT,
+      cmd: ['cargo', 'run', '--release', '--example', 'realistic_bench'],
+    },
+  ];
+
+  for (const runtime of JS_RUNTIMES) {
+    harnesses.push({
+      name: `puppeteer-${runtime}`,
+      cwd: path.join(ROOT, 'bench', 'puppeteer'),
+      cmd: tsCommand('realistic.ts', runtime),
+    });
+    harnesses.push({
+      name: `playwright-${runtime}`,
+      cwd: path.join(ROOT, 'bench', 'playwright'),
+      cmd: tsCommand('realistic.ts', runtime),
+    });
+  }
+
+  harnesses.push(
+    {
+      name: 'chromiumoxide',
+      cwd: path.join(ROOT, 'bench', 'chromiumoxide'),
+      cmd: ['cargo', 'run', '--release', '--bin', 'realistic'],
+    },
+    {
+      name: 'headless_chrome',
+      cwd: path.join(ROOT, 'bench', 'headless_chrome'),
+      cmd: ['cargo', 'run', '--release', '--bin', 'realistic'],
+    },
+  );
+
+  return harnesses;
+})();
 
 const METRICS = [
-  ['launch_chrome', 'launch_chrome'],
-  ['new_page', 'new_page'],
-  ['goto_about_blank', 'goto_about_blank'],
-  ['screenshot', 'screenshot'],
-  ['evaluate', 'evaluate'],
-  ['wait_for_selector_gap', 'wait_for_selector_gap'],
-  ['networkidle_static', 'networkidle_static'],
-  ['networkidle_deferred_250', 'networkidle_deferred_250'],
-  ['wait_for_function_gap', 'wait_for_function_gap'],
-  ['click_when_enabled_gap', 'click_when_enabled_gap'],
+  ['todomvc_boot_ready', 'todomvc_boot_ready'],
+  ['todomvc_full_flow', 'todomvc_full_flow'],
+  ['todomvc_settled_screenshot', 'todomvc_settled_screenshot'],
+  ['conduit_login_ready', 'conduit_login_ready'],
+  ['conduit_auth_article_flow', 'conduit_auth_article_flow'],
+  ['conduit_article_settled_screenshot', 'conduit_article_settled_screenshot'],
 ];
 
 function median(xs) {
@@ -59,10 +81,6 @@ function formatCell(metric) {
   return `${metric.median.toFixed(1)} ms`;
 }
 
-function formatMetricName(name) {
-  return `| ${name.padEnd(25)} `;
-}
-
 function runCommand(cwd, cmd) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd[0], cmd.slice(1), {
@@ -73,25 +91,25 @@ function runCommand(cwd, cmd) {
 
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', chunk => {
+    child.stdout.on('data', (chunk) => {
       const text = chunk.toString();
       stdout += text;
       process.stdout.write(text);
     });
-    child.stderr.on('data', chunk => {
+    child.stderr.on('data', (chunk) => {
       const text = chunk.toString();
       stderr += text;
       process.stderr.write(text);
     });
     child.on('error', reject);
-    child.on('close', code => {
+    child.on('close', (code) => {
       if (code !== 0) {
         reject(new Error(`command failed (${code}): ${cmd.join(' ')}\n${stderr}`));
         return;
       }
       const resultsLine = stdout
         .split('\n')
-        .find(line => line.startsWith('RESULTS_JSON '));
+        .find((line) => line.startsWith('RESULTS_JSON '));
       if (!resultsLine) {
         reject(new Error(`missing RESULTS_JSON line from: ${cmd.join(' ')}`));
         return;
@@ -107,7 +125,7 @@ async function main() {
   for (const harness of HARNESSES) {
     runsByLibrary[harness.name] = [];
     for (let i = 0; i < RUNS; i++) {
-      console.log(`\n== ${harness.name} run ${i + 1}/${RUNS} ==`);
+      console.log(`\n== ${harness.name} realistic run ${i + 1}/${RUNS} ==`);
       const result = await runCommand(harness.cwd, harness.cmd);
       runsByLibrary[harness.name].push(result);
     }
@@ -119,33 +137,33 @@ async function main() {
     aggregate[harness.name] = {};
     for (const [metricKey] of METRICS) {
       const present = runs
-        .map(run => run.metrics[metricKey])
-        .filter(value => value && typeof value.median === 'number');
+        .map((run) => run.metrics[metricKey])
+        .filter((value) => value && typeof value.median === 'number');
       if (!present.length) {
         aggregate[harness.name][metricKey] = null;
         continue;
       }
       aggregate[harness.name][metricKey] = {
-        median: median(present.map(value => value.median)),
-        p10: median(present.map(value => value.p10)),
+        median: median(present.map((value) => value.median)),
+        p10: median(present.map((value) => value.p10)),
         n: present[0].n,
-        note: present.find(value => value.note)?.note || null,
+        note: present.find((value) => value.note)?.note || null,
       };
     }
   }
 
-  console.log('\nMedian-of-medians matrix\n');
+  console.log('\nRealistic median-of-medians matrix\n');
   console.log(
-    `| Metric                     | ${HARNESSES.map(h => h.name.padEnd(16)).join(' | ')} |`
+    `| Metric                       | ${HARNESSES.map((h) => h.name.padEnd(16)).join(' | ')} |`,
   );
   console.log(
-    `| ${'-'.repeat(25)} | ${HARNESSES.map(() => '-'.repeat(16)).join(' | ')} |`
+    `| ${'-'.repeat(28)} | ${HARNESSES.map(() => '-'.repeat(16)).join(' | ')} |`,
   );
   for (const [metricKey, label] of METRICS) {
     const row = HARNESSES
-      .map(harness => formatCell(aggregate[harness.name][metricKey]).padEnd(16))
+      .map((harness) => formatCell(aggregate[harness.name][metricKey]).padEnd(16))
       .join(' | ');
-    console.log(`| ${label.padEnd(25)} | ${row} |`);
+    console.log(`| ${label.padEnd(28)} | ${row} |`);
   }
 
   const notes = [];
@@ -167,7 +185,7 @@ async function main() {
   console.log(`\nRESULTS_JSON ${JSON.stringify({ runs: RUNS, aggregate })}`);
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error(err);
   process.exit(1);
 });

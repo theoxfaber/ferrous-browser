@@ -270,8 +270,7 @@ fn main() -> Result<()> {
             .unwrap_or(0.0);
         selector_gaps.push(returned_at - injected_at);
     }
-    let wait_for_selector_gap =
-        stats_with_note(selector_gaps, "wait_for_element built-in polling");
+    let wait_for_selector_gap = stats_with_note(selector_gaps, "wait_for_element built-in polling");
     print_stats("wait_for_selector_gap", &wait_for_selector_gap);
 
     let networkidle_static = bench_networkidle(&tab, &networkidle_static_html())?;

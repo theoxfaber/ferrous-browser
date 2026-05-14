@@ -82,3 +82,7 @@ path = "examples/lifecycle_probe.rs"
 [[example]]
 name = "idle_verify"
 path = "examples/idle_verify.rs"
+
+[[example]]
+name = "realistic_bench"
+path = "examples/realistic_bench.rs"

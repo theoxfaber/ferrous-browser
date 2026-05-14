@@ -1,0 +1,311 @@
+:root {
+  --bg-top: #f7f1e4;
+  --bg-bottom: #d7e2e9;
+  --panel: rgba(255, 251, 245, 0.92);
+  --panel-strong: rgba(255, 248, 238, 0.98);
+  --ink: #1d2c2b;
+  --muted: #6b746f;
+  --accent: #0f766e;
+  --accent-soft: #d6f0ea;
+  --danger: #9b2c2c;
+  --line: rgba(24, 44, 42, 0.1);
+  --shadow: 0 24px 80px rgba(35, 58, 62, 0.18);
+  --radius: 28px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.9), transparent 28%),
+    linear-gradient(160deg, var(--bg-top), var(--bg-bottom));
+  font-family: "Trebuchet MS", "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.page-shell {
+  width: min(960px, calc(100vw - 48px));
+  margin: 48px auto;
+  display: grid;
+  gap: 24px;
+}
+
+.hero,
+.boot-shell,
+.todoapp {
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+}
+
+.hero {
+  padding: 32px;
+  background: linear-gradient(140deg, rgba(13, 148, 136, 0.12), rgba(255, 255, 255, 0.72));
+}
+
+.hero h1,
+.app-head h2 {
+  margin: 0;
+  font-family: Georgia, "Iowan Old Style", serif;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.hero h1 {
+  font-size: clamp(2.2rem, 5vw, 3.5rem);
+  max-width: 11ch;
+}
+
+.deck {
+  max-width: 46ch;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.boot-shell,
+.todoapp {
+  background: var(--panel);
+}
+
+.boot-shell {
+  padding: 30px;
+  display: grid;
+  gap: 16px;
+}
+
+.pulse-bar,
+.pulse-card {
+  position: relative;
+  overflow: hidden;
+  background: rgba(17, 24, 39, 0.08);
+}
+
+.pulse-bar {
+  height: 18px;
+  border-radius: 999px;
+}
+
+.pulse-bar.wide {
+  width: 58%;
+}
+
+.pulse-bar.mid {
+  width: 36%;
+}
+
+.pulse-card {
+  min-height: 240px;
+  border-radius: 22px;
+}
+
+.pulse-bar::after,
+.pulse-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.75), transparent);
+  animation: shimmer 1.15s linear infinite;
+}
+
+.todoapp {
+  padding: 28px;
+  display: grid;
+  gap: 22px;
+}
+
+.app-head,
+.toolbar,
+.composer,
+.todo-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ready-badge {
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.82rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+
+.is-booting .ready-badge {
+  transform: translateY(4px);
+  opacity: 0.65;
+}
+
+.new-todo {
+  flex: 1;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.82);
+  border-radius: 18px;
+  padding: 14px 16px;
+  font: inherit;
+  color: inherit;
+}
+
+.add-todo,
+.filter-chip,
+.clear-completed {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.add-todo {
+  padding: 14px 20px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #0f766e, #155e75);
+  color: white;
+  font-weight: 700;
+}
+
+.todo-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.todo-row {
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  transition: transform 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
+}
+
+.todo-row.completed .title {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.todo-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.toggle {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+.title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 1rem;
+}
+
+.status-pill {
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--accent);
+}
+
+.todo-row.completed .status-pill {
+  background: rgba(155, 44, 44, 0.1);
+  color: var(--danger);
+}
+
+.toolbar {
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.todo-count {
+  margin: 0;
+  color: var(--muted);
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.filter-chip,
+.clear-completed {
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  color: inherit;
+}
+
+.filter-chip.is-active {
+  background: var(--ink);
+  color: white;
+}
+
+.clear-completed[hidden] {
+  display: none;
+}
+
+.is-settling .todo-row {
+  transform: translateY(2px);
+  opacity: 0.88;
+}
+
+@media (max-width: 720px) {
+  .page-shell {
+    width: min(100vw - 28px, 960px);
+    margin: 20px auto 28px;
+  }
+
+  .hero,
+  .boot-shell,
+  .todoapp {
+    border-radius: 22px;
+  }
+
+  .hero,
+  .boot-shell,
+  .todoapp {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+
+  .composer,
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .filters {
+    justify-content: space-between;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}

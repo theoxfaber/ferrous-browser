@@ -145,9 +145,7 @@ async fn launch_once() -> Result<Browser, Box<dyn std::error::Error>> {
         .arg("--disable-dev-shm-usage")
         .build()?;
     let (browser, mut handler) = Browser::launch(config).await?;
-    tokio::spawn(async move {
-        while handler.next().await.is_some() {}
-    });
+    tokio::spawn(async move { while handler.next().await.is_some() {} });
     Ok(browser)
 }
 
@@ -199,7 +197,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gt = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let t = Instant::now();
-        page.goto("about:blank").await?.wait_for_navigation().await?;
+        page.goto("about:blank")
+            .await?
+            .wait_for_navigation()
+            .await?;
         gt.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     let goto_about_blank = stats(gt);
@@ -236,7 +237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let selector_url = format!("data:text/html,{}", urlencode(&selector_gap_html()));
     let mut selector_gaps = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
-        page.goto(&selector_url).await?.wait_for_navigation().await?;
+        page.goto(&selector_url)
+            .await?
+            .wait_for_navigation()
+            .await?;
         let timeout = Instant::now() + Duration::from_secs(5);
         loop {
             if page.find_element("#target").await.is_ok() {

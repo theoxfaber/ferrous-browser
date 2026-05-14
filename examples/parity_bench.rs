@@ -4,7 +4,7 @@
 //   cargo run --release --example parity_bench
 //
 // The output is both human-readable and machine-readable. The final
-// `RESULTS_JSON` line is consumed by `bench/run_matrix.js`.
+// `RESULTS_JSON` line is consumed by `bench/run_matrix.ts`.
 use ferrous_browser::{Browser, BrowserConfig, Page, WaitUntil};
 use serde_json::json;
 use std::time::{Duration, Instant};

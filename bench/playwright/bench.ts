@@ -1,8 +1,9 @@
-// Puppeteer side of the parity bench.
+// Playwright side of the parity bench.
 //
 // Run:
-//   node bench.js
-const puppeteer = require('puppeteer');
+//   node bench.ts
+//   bun bench.ts
+const { chromium } = require('playwright');
 const { performance } = require('perf_hooks');
 
 const CHROME_PATH = process.env.CHROME_PATH
@@ -86,13 +87,12 @@ function clickWhenEnabledHtml(delayMs) {
 }
 
 async function benchNetworkIdle(page, html) {
-  const dataUrl = 'data:text/html,' + encodeURIComponent(html);
   for (let i = 0; i < WARMUP_ITERS; i++) {
-    await page.goto(dataUrl, { waitUntil: 'networkidle0' });
+    await page.setContent(html, { waitUntil: 'networkidle' });
   }
   const xs = [];
   for (let i = 0; i < ITERS; i++) {
-    xs.push(await timed(() => page.goto(dataUrl, { waitUntil: 'networkidle0' })));
+    xs.push(await timed(() => page.setContent(html, { waitUntil: 'networkidle' })));
   }
   return stats(xs);
 }
@@ -103,35 +103,36 @@ async function benchNetworkIdle(page, html) {
   const cold = [];
   for (let i = 0; i < 5; i++) {
     const t = performance.now();
-    const browser = await puppeteer.launch({
-      headless: 'new',
+    const browser = await chromium.launch({
+      headless: true,
       executablePath: CHROME_PATH,
       args: launchArgs,
     });
     cold.push(performance.now() - t);
     await browser.close();
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   const launch = stats(cold);
   printStats('launch_chrome', launch);
 
-  const browser = await puppeteer.launch({
-    headless: 'new',
+  const browser = await chromium.launch({
+    headless: true,
     executablePath: CHROME_PATH,
     args: launchArgs,
   });
+  const context = await browser.newContext();
 
   const newPageSamples = [];
   for (let i = 0; i < ITERS; i++) {
     newPageSamples.push(await timed(async () => {
-      const page = await browser.newPage();
+      const page = await context.newPage();
       await page.close();
     }));
   }
   const newPage = stats(newPageSamples);
   printStats('new_page', newPage);
 
-  const page = await browser.newPage();
+  const page = await context.newPage();
   await page.goto('about:blank', { waitUntil: 'load' });
 
   const gotoSamples = [];
@@ -159,7 +160,7 @@ async function benchNetworkIdle(page, html) {
   const selectorGaps = [];
   for (let i = 0; i < ITERS; i++) {
     await page.goto(selectorUrl, { waitUntil: 'load' });
-    await page.waitForSelector('#target');
+    await page.waitForSelector('#target', { state: 'attached' });
     const returnedAt = await page.evaluate(() => performance.now());
     const injectedAt = await page.evaluate(() => window.__injectedAt);
     selectorGaps.push(returnedAt - injectedAt);
@@ -178,7 +179,7 @@ async function benchNetworkIdle(page, html) {
     const delay = DELAY_CYCLE_MS[i % DELAY_CYCLE_MS.length];
     const dataUrl = 'data:text/html,' + encodeURIComponent(waitForFunctionHtml(delay));
     await page.goto(dataUrl, { waitUntil: 'load' });
-    await page.waitForFunction('window.__condValue === true', { polling: 'raf', timeout: 10000 });
+    await page.waitForFunction(() => window.__condValue === true, null, { polling: 'raf', timeout: 10000 });
     const returnedAt = await page.evaluate(() => performance.now());
     const condAt = await page.evaluate(() => window.__condAt);
     waitForFunctionGaps.push(returnedAt - condAt);
@@ -200,7 +201,7 @@ async function benchNetworkIdle(page, html) {
   printStats('click_when_enabled_gap', clickWhenEnabledGap);
 
   console.log(`RESULTS_JSON ${JSON.stringify({
-    library: 'puppeteer',
+    library: 'playwright',
     metrics: {
       launch_chrome: launch,
       new_page: newPage,
@@ -216,7 +217,7 @@ async function benchNetworkIdle(page, html) {
   })}`);
 
   await browser.close();
-})().catch(err => {
+})().catch((err) => {
   console.error(err);
   process.exit(1);
 });
