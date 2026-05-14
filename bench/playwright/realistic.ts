@@ -9,6 +9,10 @@ const {
   CONDUIT_ARTICLE_SLUG,
   CONDUIT_FLOW_COMMENT,
   ITERS,
+  OPENVERSE_TARGET_ID,
+  RWA_AMOUNT,
+  RWA_NOTE,
+  RWA_RECIPIENT,
   assertActiveFilteredSnapshot,
   assertCompletedSnapshot,
   assertConduitArticleSnapshot,
@@ -16,8 +20,17 @@ const {
   assertConduitLoginSnapshot,
   assertFinalSnapshot,
   assertInitialSnapshot,
+  assertOpenverseDetailSnapshot,
+  assertOpenverseFilteredSnapshot,
+  assertOpenverseInitialSnapshot,
+  assertRwaDashboardSnapshot,
+  assertRwaLoginSnapshot,
+  assertRwaReceiptSnapshot,
+  assertRwaReviewSnapshot,
   conduitUrl,
+  openverseUrl,
   printStats,
+  rwaUrl,
   stats,
   timed,
   todoMvcUrl,
@@ -47,6 +60,20 @@ async function loadConduitLogin(page, url) {
   await waitReady(page);
   await waitSettled(page);
   assertConduitLoginSnapshot(await snapshot(page));
+}
+
+async function loadOpenverseSearch(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitReady(page);
+  await waitSettled(page);
+  assertOpenverseInitialSnapshot(await snapshot(page));
+}
+
+async function loadRwaLogin(page, url) {
+  await page.goto(url, { waitUntil: 'load' });
+  await waitReady(page);
+  await waitSettled(page);
+  assertRwaLoginSnapshot(await snapshot(page));
 }
 
 async function addTodo(page, title) {
@@ -106,6 +133,50 @@ async function conduitPostComment(page, comment) {
   ]);
 }
 
+async function openverseApplyFilters(page) {
+  await page.locator('.media-image').click();
+  await waitSettled(page);
+  await page.locator('.license-cc0').click();
+  await waitSettled(page);
+  assertOpenverseFilteredSnapshot(await snapshot(page));
+}
+
+async function openverseOpenTargetDetail(page) {
+  await page.locator(`.open-detail[data-id="${OPENVERSE_TARGET_ID}"]`).click();
+  await waitSettled(page);
+  assertOpenverseDetailSnapshot(await snapshot(page));
+}
+
+async function rwaLoginToDashboard(page) {
+  await page.locator('.login-submit').click();
+  await waitSettled(page);
+  assertRwaDashboardSnapshot(await snapshot(page), false);
+}
+
+async function rwaOpenComposer(page) {
+  await page.locator('.start-payment').click();
+  await waitSettled(page);
+  assertRwaDashboardSnapshot(await snapshot(page), true);
+}
+
+async function rwaDraftPayment(page) {
+  await page.locator('.payment-recipient').fill(RWA_RECIPIENT);
+  await page.locator('.payment-amount').fill(RWA_AMOUNT);
+  await page.locator('.payment-note').fill(RWA_NOTE);
+}
+
+async function rwaReviewPayment(page) {
+  await page.locator('.payment-review').click();
+  await waitSettled(page);
+  assertRwaReviewSnapshot(await snapshot(page));
+}
+
+async function rwaSubmitPayment(page) {
+  await page.locator('.payment-submit').click();
+  await waitSettled(page);
+  assertRwaReceiptSnapshot(await snapshot(page));
+}
+
 (async () => {
   const browser = await chromium.launch({
     headless: true,
@@ -116,6 +187,8 @@ async function conduitPostComment(page, comment) {
   const page = await context.newPage();
   const url = todoMvcUrl();
   const conduit = conduitUrl();
+  const openverse = openverseUrl();
+  const rwa = rwaUrl();
 
   const bootReadySamples = [];
   for (let i = 0; i < ITERS; i++) {
@@ -185,6 +258,78 @@ async function conduitPostComment(page, comment) {
   const conduitArticleSettledScreenshot = stats(conduitArticleSettledScreenshotSamples);
   printStats('conduit_article_settled_screenshot', conduitArticleSettledScreenshot);
 
+  const openverseSearchReadySamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    openverseSearchReadySamples.push(await timed(() => loadOpenverseSearch(page, openverse)));
+  }
+  const openverseSearchReady = stats(openverseSearchReadySamples);
+  printStats('openverse_search_ready', openverseSearchReady);
+
+  const openverseFilterDetailFlowSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    await loadOpenverseSearch(page, openverse);
+    openverseFilterDetailFlowSamples.push(await timed(async () => {
+      await openverseApplyFilters(page);
+      await openverseOpenTargetDetail(page);
+    }));
+  }
+  const openverseFilterDetailFlow = stats(openverseFilterDetailFlowSamples);
+  printStats('openverse_filter_detail_flow', openverseFilterDetailFlow);
+
+  const openverseDetailSettledScreenshotSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    await loadOpenverseSearch(page, openverse);
+    await openverseApplyFilters(page);
+    openverseDetailSettledScreenshotSamples.push(await timed(async () => {
+      await openverseOpenTargetDetail(page);
+      const png = await page.screenshot();
+      if (png.length < 15_000) {
+        throw new Error(`unexpectedly small openverse screenshot: ${png.length} bytes`);
+      }
+    }));
+  }
+  const openverseDetailSettledScreenshot = stats(openverseDetailSettledScreenshotSamples);
+  printStats('openverse_detail_settled_screenshot', openverseDetailSettledScreenshot);
+
+  const rwaLoginReadySamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    rwaLoginReadySamples.push(await timed(() => loadRwaLogin(page, rwa)));
+  }
+  const rwaLoginReady = stats(rwaLoginReadySamples);
+  printStats('rwa_login_ready', rwaLoginReady);
+
+  const rwaPaymentFlowSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    await loadRwaLogin(page, rwa);
+    rwaPaymentFlowSamples.push(await timed(async () => {
+      await rwaLoginToDashboard(page);
+      await rwaOpenComposer(page);
+      await rwaDraftPayment(page);
+      await rwaReviewPayment(page);
+      await rwaSubmitPayment(page);
+    }));
+  }
+  const rwaPaymentFlow = stats(rwaPaymentFlowSamples);
+  printStats('rwa_payment_flow', rwaPaymentFlow);
+
+  const rwaReceiptSettledScreenshotSamples = [];
+  for (let i = 0; i < ITERS; i++) {
+    await loadRwaLogin(page, rwa);
+    await rwaLoginToDashboard(page);
+    await rwaOpenComposer(page);
+    await rwaDraftPayment(page);
+    await rwaReviewPayment(page);
+    rwaReceiptSettledScreenshotSamples.push(await timed(async () => {
+      await rwaSubmitPayment(page);
+      const png = await page.screenshot();
+      if (png.length < 15_000) {
+        throw new Error(`unexpectedly small rwa screenshot: ${png.length} bytes`);
+      }
+    }));
+  }
+  const rwaReceiptSettledScreenshot = stats(rwaReceiptSettledScreenshotSamples);
+  printStats('rwa_receipt_settled_screenshot', rwaReceiptSettledScreenshot);
+
   console.log(`RESULTS_JSON ${JSON.stringify({
     library: 'playwright',
     scenario: 'realistic',
@@ -195,6 +340,12 @@ async function conduitPostComment(page, comment) {
       conduit_login_ready: conduitLoginReady,
       conduit_auth_article_flow: conduitAuthArticleFlow,
       conduit_article_settled_screenshot: conduitArticleSettledScreenshot,
+      openverse_search_ready: openverseSearchReady,
+      openverse_filter_detail_flow: openverseFilterDetailFlow,
+      openverse_detail_settled_screenshot: openverseDetailSettledScreenshot,
+      rwa_login_ready: rwaLoginReady,
+      rwa_payment_flow: rwaPaymentFlow,
+      rwa_receipt_settled_screenshot: rwaReceiptSettledScreenshot,
     },
   })}`);
 

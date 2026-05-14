@@ -40,9 +40,23 @@ function conduitUrl() {
   return pathToFileURL(path.join(__dirname, 'fixtures', 'conduit', 'index.html')).href;
 }
 
+function openverseUrl() {
+  return pathToFileURL(path.join(__dirname, 'fixtures', 'openverse', 'index.html')).href;
+}
+
+function rwaUrl() {
+  return pathToFileURL(path.join(__dirname, 'fixtures', 'rwa', 'index.html')).href;
+}
+
 const CONDUIT_ARTICLE_SLUG = 'composite-network-idle';
 const CONDUIT_ARTICLE_TITLE = 'Composite NetworkIdle';
 const CONDUIT_FLOW_COMMENT = 'Benchmark the real flow.';
+const OPENVERSE_TARGET_ID = 'quiet-morning-stacks';
+const OPENVERSE_TARGET_TITLE = 'Quiet Morning Stacks';
+const RWA_RECIPIENT = 'Mina Hart';
+const RWA_AMOUNT = '127.45';
+const RWA_NOTE = 'Benchmark seeded payment.';
+const RWA_RECEIPT_ID = 'TX-3020';
 
 function expectArrayEqual(actual, expected, label) {
   if (actual.length !== expected.length) {
@@ -156,12 +170,124 @@ function assertConduitArticleSnapshot(snapshot, expectedCommentBodies) {
   expectArrayEqual(snapshot.articleCommentBodies, expectedCommentBodies, 'conduit article comments');
 }
 
+function assertOpenverseInitialSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.skeletonVisible) {
+    throw new Error(`openverse initial snapshot not ready: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.view !== 'search' || !snapshot.resultsVisible || snapshot.detailVisible) {
+    throw new Error(`unexpected openverse initial view state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.query !== 'quiet cities' || snapshot.mediaType !== 'all' || snapshot.license !== 'all' || snapshot.resultCount !== 4) {
+    throw new Error(`unexpected openverse initial filters: ${JSON.stringify(snapshot)}`);
+  }
+  expectArrayEqual(snapshot.visibleTitles, [
+    'Rooftops at Noon',
+    'Streetcar Ambience',
+    OPENVERSE_TARGET_TITLE,
+    'Marble Atrium',
+  ], 'openverse initial visible titles');
+}
+
+function assertOpenverseFilteredSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.skeletonVisible) {
+    throw new Error(`openverse filtered snapshot not ready: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.view !== 'search' || !snapshot.resultsVisible || snapshot.detailVisible) {
+    throw new Error(`unexpected openverse filtered view state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.mediaType !== 'image' || snapshot.license !== 'cc0' || snapshot.resultCount !== 2) {
+    throw new Error(`unexpected openverse filtered controls: ${JSON.stringify(snapshot)}`);
+  }
+  expectArrayEqual(snapshot.visibleTitles, [
+    'Rooftops at Noon',
+    OPENVERSE_TARGET_TITLE,
+  ], 'openverse filtered visible titles');
+}
+
+function assertOpenverseDetailSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.skeletonVisible) {
+    throw new Error(`openverse detail snapshot not settled: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.view !== 'detail' || snapshot.resultsVisible || !snapshot.detailVisible || !snapshot.detailReady) {
+    throw new Error(`unexpected openverse detail view state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.mediaType !== 'image' || snapshot.license !== 'cc0' || snapshot.resultCount !== 2) {
+    throw new Error(`unexpected openverse detail filters: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.detailTitle !== OPENVERSE_TARGET_TITLE || snapshot.detailProvider !== 'Openverse Catalog' || snapshot.detailKind !== 'image' || snapshot.detailLicense !== 'cc0') {
+    throw new Error(`unexpected openverse detail metadata: ${JSON.stringify(snapshot)}`);
+  }
+  expectArrayEqual(snapshot.detailTags, ['masonry', 'dawn', 'urban'], 'openverse detail tags');
+}
+
+function assertRwaLoginSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.skeletonVisible) {
+    throw new Error(`rwa login snapshot not ready: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.route !== 'login' || snapshot.loggedIn || !snapshot.loginVisible || snapshot.dashboardVisible || snapshot.reviewVisible || snapshot.receiptVisible) {
+    throw new Error(`unexpected rwa login route state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.userName !== 'guest' || snapshot.composerVisible || snapshot.receiptId !== null) {
+    throw new Error(`unexpected rwa login metadata: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertRwaDashboardSnapshot(snapshot, expectedComposerVisible) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.skeletonVisible) {
+    throw new Error(`rwa dashboard snapshot not ready: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.route !== 'dashboard' || !snapshot.loggedIn || snapshot.loginVisible || !snapshot.dashboardVisible || snapshot.reviewVisible || snapshot.receiptVisible) {
+    throw new Error(`unexpected rwa dashboard route state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.userName !== 'Jordan Vale' || snapshot.composerVisible !== expectedComposerVisible) {
+    throw new Error(`unexpected rwa dashboard metadata: ${JSON.stringify(snapshot)}`);
+  }
+  expectArrayEqual(snapshot.transactionTitles, [
+    'Payroll adjustment',
+    'Operations rent',
+    'Travel reimbursement',
+  ], 'rwa dashboard transactions');
+}
+
+function assertRwaReviewSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.skeletonVisible) {
+    throw new Error(`rwa review snapshot not settled: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.route !== 'review' || !snapshot.loggedIn || snapshot.loginVisible || snapshot.dashboardVisible || !snapshot.reviewVisible || snapshot.receiptVisible) {
+    throw new Error(`unexpected rwa review route state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.userName !== 'Jordan Vale' || snapshot.draftRecipient !== RWA_RECIPIENT || snapshot.draftAmount !== RWA_AMOUNT || snapshot.draftNote !== RWA_NOTE || snapshot.reviewAmountCents !== 12745) {
+    throw new Error(`unexpected rwa review metadata: ${JSON.stringify(snapshot)}`);
+  }
+}
+
+function assertRwaReceiptSnapshot(snapshot) {
+  if (!snapshot.ready || !snapshot.settled || snapshot.skeletonVisible) {
+    throw new Error(`rwa receipt snapshot not settled: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.route !== 'receipt' || !snapshot.loggedIn || snapshot.loginVisible || snapshot.dashboardVisible || snapshot.reviewVisible || !snapshot.receiptVisible) {
+    throw new Error(`unexpected rwa receipt route state: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.userName !== 'Jordan Vale' || snapshot.receiptId !== RWA_RECEIPT_ID || snapshot.receiptAmountLabel !== '-$127.45' || snapshot.receiptRecipient !== RWA_RECIPIENT) {
+    throw new Error(`unexpected rwa receipt metadata: ${JSON.stringify(snapshot)}`);
+  }
+  if (snapshot.transactionTitles[0] !== `Peer payment to ${RWA_RECIPIENT}`) {
+    throw new Error(`unexpected rwa transaction order: ${JSON.stringify(snapshot)}`);
+  }
+}
+
 module.exports = {
   CHROME_PATH,
   CONDUIT_ARTICLE_SLUG,
   CONDUIT_FLOW_COMMENT,
   ITERS,
+  OPENVERSE_TARGET_ID,
+  OPENVERSE_TARGET_TITLE,
   ROOT,
+  RWA_AMOUNT,
+  RWA_NOTE,
+  RWA_RECEIPT_ID,
+  RWA_RECIPIENT,
   assertActiveFilteredSnapshot,
   assertCompletedSnapshot,
   assertConduitArticleSnapshot,
@@ -169,8 +295,17 @@ module.exports = {
   assertConduitLoginSnapshot,
   assertFinalSnapshot,
   assertInitialSnapshot,
+  assertOpenverseDetailSnapshot,
+  assertOpenverseFilteredSnapshot,
+  assertOpenverseInitialSnapshot,
+  assertRwaDashboardSnapshot,
+  assertRwaLoginSnapshot,
+  assertRwaReceiptSnapshot,
+  assertRwaReviewSnapshot,
   conduitUrl,
+  openverseUrl,
   printStats,
+  rwaUrl,
   stats,
   timed,
   todoMvcUrl,

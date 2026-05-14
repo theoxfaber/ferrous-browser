@@ -11,6 +11,13 @@ fixtures instead of isolated primitives.
 - `conduit`: local file-backed RealWorld-style auth/feed/article app with a
   delayed boot shell, seeded sign-in, favorite propagation, delayed article
   hydration, comment posting, and an article-grade settled screenshot.
+- `openverse`: local file-backed Openverse-style search/detail app with a
+  delayed media shell, deterministic filter interactions, delayed detail
+  hydration, and a screenshot-oriented settled state that makes early capture
+  obvious.
+- `rwa`: local file-backed Cypress Real World App-style seeded payment flow
+  with delayed login/dashboard transitions, deterministic review/receipt
+  states, and a receipt-grade settled screenshot.
 
 ## Metrics
 
@@ -24,14 +31,28 @@ Every realistic harness reports the same scenario metrics:
 | `conduit_login_ready` | `goto(..., load)` until the seeded login view is settled |
 | `conduit_auth_article_flow` | sign in -> favorite target article -> open it -> post a comment |
 | `conduit_article_settled_screenshot` | feed action -> article settle -> screenshot |
+| `openverse_search_ready` | `goto(..., load)` until the seeded search results view is settled |
+| `openverse_filter_detail_flow` | apply filters -> open delayed detail view -> assert hydrated media state |
+| `openverse_detail_settled_screenshot` | results action -> detail settle -> screenshot |
+| `rwa_login_ready` | `goto(..., load)` until the seeded login screen is settled |
+| `rwa_payment_flow` | login -> open composer -> draft -> review -> submit payment |
+| `rwa_receipt_settled_screenshot` | payment submit -> receipt settle -> screenshot |
 
-The TodoMVC fixture uses `file://` URLs, so every library sees the exact same
-HTML, CSS, and JavaScript without a local server sitting in the middle.
+All fixtures use `file://` URLs, so every library sees the exact same HTML,
+CSS, and JavaScript without a local server sitting in the middle.
 
 ## Running
 
 ```sh
 # Full realistic matrix (3 runs by default)
+cargo run --release --example suite_bench
+
+For ferrous-browser-only realistic work, prefer the direct Rust suite above. It
+keeps the ferrous lane on the stable direct launch path in constrained
+CI/sandbox environments.
+
+For the full cross-library realistic matrix:
+
 node bench/run_realistic_matrix.ts
 
 # Opt into Bun-backed Puppeteer / Playwright columns as well
@@ -53,7 +74,8 @@ cd bench/chromiumoxide && cargo run --release --bin realistic
 cd bench/headless_chrome && cargo run --release --bin realistic
 ```
 
-Set `RUNS=1` for a quick local smoke pass.
+Set `RUNS=1` for a quick matrix smoke pass, or `ITERS=1` when invoking a
+single harness directly.
 By default the JS libraries run under Node only; set
 `JS_RUNTIMES=node,bun` to add Bun-backed Puppeteer / Playwright columns.
 
@@ -69,9 +91,9 @@ or run the same commands with Bun instead.
 ## Roadmap
 
 The scaffold is intended to grow into a broader scenario matrix.
-The first two bullets below are implemented today. The third and fourth are
-specific next examples that were in mind when this lane was designed, not
-generic category labels:
+All four bullets below are implemented today. The point of calling them out
+explicitly is to make the intended benchmark corpus legible to someone new
+coming along, rather than leaving them as vague future categories:
 
 - TodoMVC: micro-SPA interaction baseline
 - RealWorld / Conduit: auth, routing, CRUD, feed/article flows

@@ -1,16 +1,77 @@
-use ferrous_browser::{Browser, BrowserConfig, Page, WaitUntil};
+use ferrous_browser::{Browser, BrowserConfig, Page, ScreenshotOptions, WaitUntil};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const ITERS: usize = 10;
+const DEFAULT_ITERS: usize = 10;
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-const READY_EXPR: &str = "document.body.dataset.appReady === 'true'";
 const SETTLED_EXPR: &str = "document.body.dataset.uiSettled === 'true'";
+const READY_AND_SETTLED_EXPR: &str =
+    "document.body.dataset.appReady === 'true' && document.body.dataset.uiSettled === 'true'";
+const SNAPSHOT_EXPR: &str = "window.__bench.snapshot()";
 const CONDUIT_SLUG: &str = "composite-network-idle";
 const CONDUIT_TITLE: &str = "Composite NetworkIdle";
 const CONDUIT_COMMENT: &str = "Benchmark the real flow.";
+const OPENVERSE_TARGET_ID: &str = "quiet-morning-stacks";
+const OPENVERSE_TARGET_TITLE: &str = "Quiet Morning Stacks";
+const RWA_RECIPIENT: &str = "Mina Hart";
+const RWA_AMOUNT: &str = "127.45";
+const RWA_NOTE: &str = "Benchmark seeded payment.";
+const RWA_RECEIPT_ID: &str = "TX-3020";
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum TodoFilter {
+    All,
+    Active,
+    Completed,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ConduitRoute {
+    Login,
+    Feed,
+    Article,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum OpenverseView {
+    Search,
+    Detail,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum OpenverseMediaType {
+    All,
+    Image,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum OpenverseLicense {
+    All,
+    Cc0,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum OpenverseDetailKind {
+    Image,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum RwaRoute {
+    Login,
+    Dashboard,
+    Review,
+    Receipt,
+}
 
 #[derive(Clone)]
 struct Stats {
@@ -25,7 +86,7 @@ struct Stats {
 struct Snapshot {
     ready: bool,
     settled: bool,
-    filter: String,
+    filter: TodoFilter,
     total_count: usize,
     active_count: usize,
     completed_count: usize,
@@ -38,7 +99,7 @@ struct Snapshot {
 struct ConduitSnapshot {
     ready: bool,
     settled: bool,
-    route: String,
+    route: ConduitRoute,
     logged_in: bool,
     skeleton_visible: bool,
     login_visible: bool,
@@ -55,21 +116,74 @@ struct ConduitSnapshot {
     article_comment_bodies: Vec<String>,
 }
 
-fn median(mut xs: Vec<f64>) -> f64 {
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    xs[xs.len() / 2]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenverseSnapshot {
+    ready: bool,
+    settled: bool,
+    view: OpenverseView,
+    query: String,
+    media_type: OpenverseMediaType,
+    license: OpenverseLicense,
+    skeleton_visible: bool,
+    results_visible: bool,
+    detail_visible: bool,
+    result_count: usize,
+    visible_titles: Vec<String>,
+    detail_title: Option<String>,
+    detail_ready: bool,
+    detail_provider: Option<String>,
+    detail_kind: Option<OpenverseDetailKind>,
+    detail_license: Option<OpenverseLicense>,
+    detail_tags: Vec<String>,
 }
 
-fn p10(mut xs: Vec<f64>) -> f64 {
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    xs[(xs.len() as f64 * 0.1) as usize]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RwaSnapshot {
+    ready: bool,
+    settled: bool,
+    route: RwaRoute,
+    logged_in: bool,
+    skeleton_visible: bool,
+    login_visible: bool,
+    dashboard_visible: bool,
+    review_visible: bool,
+    receipt_visible: bool,
+    composer_visible: bool,
+    user_name: String,
+    transaction_titles: Vec<String>,
+    draft_recipient: String,
+    draft_amount: String,
+    draft_note: String,
+    review_amount_cents: usize,
+    receipt_id: Option<String>,
+    receipt_amount_label: Option<String>,
+    receipt_recipient: Option<String>,
 }
 
-fn stats(xs: Vec<f64>) -> Stats {
+/// Linear-interpolation quantile (numpy's default `method="linear"`).
+fn quantile_sorted(xs: &[f64], q: f64) -> f64 {
+    let n = xs.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n == 1 {
+        return xs[0];
+    }
+    let pos = (n - 1) as f64 * q;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    let frac = pos - lo as f64;
+    xs[lo] + frac * (xs[hi] - xs[lo])
+}
+
+fn stats(mut xs: Vec<f64>) -> Stats {
+    xs.sort_by(f64::total_cmp);
     let n = xs.len();
     Stats {
-        median: median(xs.clone()),
-        p10: p10(xs),
+        median: quantile_sorted(&xs, 0.50),
+        p10: quantile_sorted(&xs, 0.10),
         n,
         note: None,
     }
@@ -95,6 +209,14 @@ fn stats_to_json(s: &Stats) -> serde_json::Value {
         "n": s.n,
         "note": s.note,
     })
+}
+
+fn iterations() -> usize {
+    std::env::var("ITERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ITERS)
 }
 
 fn bench_chrome_path() -> String {
@@ -132,9 +254,20 @@ fn conduit_url() -> String {
     format!("file://{}", path.display())
 }
 
-async fn wait_ready(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
-    page.wait_for_function(READY_EXPR, WAIT_TIMEOUT).await?;
-    Ok(())
+fn openverse_url() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("bench/realistic/fixtures/openverse/index.html")
+        .canonicalize()
+        .expect("canonicalize Openverse fixture");
+    format!("file://{}", path.display())
+}
+
+fn rwa_url() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("bench/realistic/fixtures/rwa/index.html")
+        .canonicalize()
+        .expect("canonicalize RWA fixture");
+    format!("file://{}", path.display())
 }
 
 async fn wait_settled(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
@@ -142,12 +275,33 @@ async fn wait_settled(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn snapshot(page: &Page) -> Result<Snapshot, Box<dyn std::error::Error>> {
-    Ok(page.evaluate("window.__bench.snapshot()").await?)
+async fn settled_snapshot<T: DeserializeOwned>(
+    page: &Page,
+) -> Result<T, Box<dyn std::error::Error>> {
+    Ok(page
+        .wait_for_function_value(SETTLED_EXPR, SNAPSHOT_EXPR, WAIT_TIMEOUT)
+        .await?)
 }
 
-async fn conduit_snapshot(page: &Page) -> Result<ConduitSnapshot, Box<dyn std::error::Error>> {
-    Ok(page.evaluate("window.__bench.snapshot()").await?)
+async fn ready_and_settled_snapshot<T: DeserializeOwned>(
+    page: &Page,
+) -> Result<T, Box<dyn std::error::Error>> {
+    Ok(page
+        .wait_for_function_value(READY_AND_SETTLED_EXPR, SNAPSHOT_EXPR, WAIT_TIMEOUT)
+        .await?)
+}
+
+async fn capture_png(
+    page: &Page,
+    options: ScreenshotOptions,
+    min_size: usize,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let png = page.screenshot_with_options(options).await?;
+    if png.len() < min_size {
+        return Err(format!("unexpectedly small {label}: {} bytes", png.len()).into());
+    }
+    Ok(())
 }
 
 fn expect_titles(
@@ -155,9 +309,12 @@ fn expect_titles(
     expected: &[&str],
     label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let expected_vec: Vec<String> = expected.iter().map(|value| value.to_string()).collect();
-    if actual != expected_vec {
-        return Err(format!("{label}: expected {:?}, got {:?}", expected_vec, actual).into());
+    if !actual
+        .iter()
+        .map(String::as_str)
+        .eq(expected.iter().copied())
+    {
+        return Err(format!("{label}: expected {:?}, got {:?}", expected, actual).into());
     }
     Ok(())
 }
@@ -166,7 +323,7 @@ fn assert_initial_snapshot(snapshot: &Snapshot) -> Result<(), Box<dyn std::error
     if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
         return Err(format!("initial snapshot not ready: {:?}", snapshot).into());
     }
-    if snapshot.filter != "all"
+    if snapshot.filter != TodoFilter::All
         || snapshot.total_count != 3
         || snapshot.active_count != 2
         || snapshot.completed_count != 1
@@ -185,7 +342,7 @@ fn assert_initial_snapshot(snapshot: &Snapshot) -> Result<(), Box<dyn std::error
 }
 
 fn assert_completed_snapshot(snapshot: &Snapshot) -> Result<(), Box<dyn std::error::Error>> {
-    if snapshot.filter != "completed" || snapshot.completed_count != 2 {
+    if snapshot.filter != TodoFilter::Completed || snapshot.completed_count != 2 {
         return Err(format!("unexpected completed snapshot: {:?}", snapshot).into());
     }
     expect_titles(
@@ -199,7 +356,7 @@ fn assert_active_filtered_snapshot(snapshot: &Snapshot) -> Result<(), Box<dyn st
     if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
         return Err(format!("active-filter snapshot not settled: {:?}", snapshot).into());
     }
-    if snapshot.filter != "active"
+    if snapshot.filter != TodoFilter::Active
         || snapshot.total_count != 5
         || snapshot.active_count != 3
         || snapshot.completed_count != 2
@@ -221,7 +378,7 @@ fn assert_final_snapshot(snapshot: &Snapshot) -> Result<(), Box<dyn std::error::
     if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
         return Err(format!("final snapshot not settled: {:?}", snapshot).into());
     }
-    if snapshot.filter != "all"
+    if snapshot.filter != TodoFilter::All
         || snapshot.total_count != 3
         || snapshot.active_count != 3
         || snapshot.completed_count != 0
@@ -245,7 +402,7 @@ fn assert_conduit_login_snapshot(
     if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
         return Err(format!("conduit login snapshot not ready: {:?}", snapshot).into());
     }
-    if snapshot.route != "login"
+    if snapshot.route != ConduitRoute::Login
         || snapshot.logged_in
         || !snapshot.login_visible
         || snapshot.feed_visible
@@ -271,7 +428,7 @@ fn assert_conduit_feed_snapshot(
     if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
         return Err(format!("conduit feed snapshot not ready: {:?}", snapshot).into());
     }
-    if snapshot.route != "feed"
+    if snapshot.route != ConduitRoute::Feed
         || !snapshot.logged_in
         || snapshot.login_visible
         || !snapshot.feed_visible
@@ -310,7 +467,7 @@ fn assert_conduit_article_snapshot(
     if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
         return Err(format!("conduit article snapshot not settled: {:?}", snapshot).into());
     }
-    if snapshot.route != "article"
+    if snapshot.route != ConduitRoute::Article
         || !snapshot.logged_in
         || snapshot.login_visible
         || snapshot.feed_visible
@@ -341,21 +498,221 @@ fn assert_conduit_article_snapshot(
     Ok(())
 }
 
+fn assert_openverse_initial_snapshot(
+    snapshot: &OpenverseSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
+        return Err(format!("openverse initial snapshot not ready: {:?}", snapshot).into());
+    }
+    if snapshot.view != OpenverseView::Search
+        || !snapshot.results_visible
+        || snapshot.detail_visible
+    {
+        return Err(format!("unexpected openverse initial view state: {:?}", snapshot).into());
+    }
+    if snapshot.query != "quiet cities"
+        || snapshot.media_type != OpenverseMediaType::All
+        || snapshot.license != OpenverseLicense::All
+        || snapshot.result_count != 4
+    {
+        return Err(format!("unexpected openverse initial filters: {:?}", snapshot).into());
+    }
+    expect_titles(
+        &snapshot.visible_titles,
+        &[
+            "Rooftops at Noon",
+            "Streetcar Ambience",
+            OPENVERSE_TARGET_TITLE,
+            "Marble Atrium",
+        ],
+        "openverse initial visible titles",
+    )
+}
+
+fn assert_openverse_filtered_snapshot(
+    snapshot: &OpenverseSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
+        return Err(format!("openverse filtered snapshot not ready: {:?}", snapshot).into());
+    }
+    if snapshot.view != OpenverseView::Search
+        || !snapshot.results_visible
+        || snapshot.detail_visible
+    {
+        return Err(format!("unexpected openverse filtered view state: {:?}", snapshot).into());
+    }
+    if snapshot.media_type != OpenverseMediaType::Image
+        || snapshot.license != OpenverseLicense::Cc0
+        || snapshot.result_count != 2
+    {
+        return Err(format!("unexpected openverse filtered controls: {:?}", snapshot).into());
+    }
+    expect_titles(
+        &snapshot.visible_titles,
+        &["Rooftops at Noon", OPENVERSE_TARGET_TITLE],
+        "openverse filtered visible titles",
+    )
+}
+
+fn assert_openverse_detail_snapshot(
+    snapshot: &OpenverseSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
+        return Err(format!("openverse detail snapshot not settled: {:?}", snapshot).into());
+    }
+    if snapshot.view != OpenverseView::Detail
+        || snapshot.results_visible
+        || !snapshot.detail_visible
+        || !snapshot.detail_ready
+    {
+        return Err(format!("unexpected openverse detail view state: {:?}", snapshot).into());
+    }
+    if snapshot.media_type != OpenverseMediaType::Image
+        || snapshot.license != OpenverseLicense::Cc0
+        || snapshot.result_count != 2
+    {
+        return Err(format!("unexpected openverse detail filters: {:?}", snapshot).into());
+    }
+    if snapshot.detail_title.as_deref() != Some(OPENVERSE_TARGET_TITLE)
+        || snapshot.detail_provider.as_deref() != Some("Openverse Catalog")
+        || snapshot.detail_kind != Some(OpenverseDetailKind::Image)
+        || snapshot.detail_license != Some(OpenverseLicense::Cc0)
+    {
+        return Err(format!("unexpected openverse detail metadata: {:?}", snapshot).into());
+    }
+    expect_titles(
+        &snapshot.detail_tags,
+        &["masonry", "dawn", "urban"],
+        "openverse detail tags",
+    )
+}
+
+fn assert_rwa_login_snapshot(snapshot: &RwaSnapshot) -> Result<(), Box<dyn std::error::Error>> {
+    if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
+        return Err(format!("rwa login snapshot not ready: {:?}", snapshot).into());
+    }
+    if snapshot.route != RwaRoute::Login
+        || snapshot.logged_in
+        || !snapshot.login_visible
+        || snapshot.dashboard_visible
+        || snapshot.review_visible
+        || snapshot.receipt_visible
+    {
+        return Err(format!("unexpected rwa login route state: {:?}", snapshot).into());
+    }
+    if snapshot.user_name != "guest" || snapshot.composer_visible || snapshot.receipt_id.is_some() {
+        return Err(format!("unexpected rwa login metadata: {:?}", snapshot).into());
+    }
+    Ok(())
+}
+
+fn assert_rwa_dashboard_snapshot(
+    snapshot: &RwaSnapshot,
+    expected_composer_visible: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
+        return Err(format!("rwa dashboard snapshot not ready: {:?}", snapshot).into());
+    }
+    if snapshot.route != RwaRoute::Dashboard
+        || !snapshot.logged_in
+        || snapshot.login_visible
+        || !snapshot.dashboard_visible
+        || snapshot.review_visible
+        || snapshot.receipt_visible
+    {
+        return Err(format!("unexpected rwa dashboard route state: {:?}", snapshot).into());
+    }
+    if snapshot.user_name != "Jordan Vale" || snapshot.composer_visible != expected_composer_visible
+    {
+        return Err(format!("unexpected rwa dashboard metadata: {:?}", snapshot).into());
+    }
+    expect_titles(
+        &snapshot.transaction_titles,
+        &[
+            "Payroll adjustment",
+            "Operations rent",
+            "Travel reimbursement",
+        ],
+        "rwa dashboard transactions",
+    )
+}
+
+fn assert_rwa_review_snapshot(snapshot: &RwaSnapshot) -> Result<(), Box<dyn std::error::Error>> {
+    if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
+        return Err(format!("rwa review snapshot not settled: {:?}", snapshot).into());
+    }
+    if snapshot.route != RwaRoute::Review
+        || !snapshot.logged_in
+        || snapshot.login_visible
+        || snapshot.dashboard_visible
+        || !snapshot.review_visible
+        || snapshot.receipt_visible
+    {
+        return Err(format!("unexpected rwa review route state: {:?}", snapshot).into());
+    }
+    if snapshot.user_name != "Jordan Vale"
+        || snapshot.draft_recipient != RWA_RECIPIENT
+        || snapshot.draft_amount != RWA_AMOUNT
+        || snapshot.draft_note != RWA_NOTE
+        || snapshot.review_amount_cents != 12_745
+    {
+        return Err(format!("unexpected rwa review metadata: {:?}", snapshot).into());
+    }
+    Ok(())
+}
+
+fn assert_rwa_receipt_snapshot(snapshot: &RwaSnapshot) -> Result<(), Box<dyn std::error::Error>> {
+    if !snapshot.ready || !snapshot.settled || snapshot.skeleton_visible {
+        return Err(format!("rwa receipt snapshot not settled: {:?}", snapshot).into());
+    }
+    if snapshot.route != RwaRoute::Receipt
+        || !snapshot.logged_in
+        || snapshot.login_visible
+        || snapshot.dashboard_visible
+        || snapshot.review_visible
+        || !snapshot.receipt_visible
+    {
+        return Err(format!("unexpected rwa receipt route state: {:?}", snapshot).into());
+    }
+    if snapshot.user_name != "Jordan Vale"
+        || snapshot.receipt_id.as_deref() != Some(RWA_RECEIPT_ID)
+        || snapshot.receipt_amount_label.as_deref() != Some("-$127.45")
+        || snapshot.receipt_recipient.as_deref() != Some(RWA_RECIPIENT)
+    {
+        return Err(format!("unexpected rwa receipt metadata: {:?}", snapshot).into());
+    }
+    if snapshot.transaction_titles.first().map(|s| s.as_str()) != Some("Peer payment to Mina Hart")
+    {
+        return Err(format!("unexpected rwa transaction order: {:?}", snapshot).into());
+    }
+    Ok(())
+}
+
 async fn load_initial_state(page: &Page, url: &str) -> Result<(), Box<dyn std::error::Error>> {
     page.goto(url, WaitUntil::Load).await?;
-    wait_ready(page).await?;
-    wait_settled(page).await?;
-    let snap = snapshot(page).await?;
+    let snap: Snapshot = ready_and_settled_snapshot(page).await?;
     assert_initial_snapshot(&snap)?;
     Ok(())
 }
 
 async fn load_conduit_login(page: &Page, url: &str) -> Result<(), Box<dyn std::error::Error>> {
     page.goto(url, WaitUntil::Load).await?;
-    wait_ready(page).await?;
-    wait_settled(page).await?;
-    let snap = conduit_snapshot(page).await?;
+    let snap: ConduitSnapshot = ready_and_settled_snapshot(page).await?;
     assert_conduit_login_snapshot(&snap)?;
+    Ok(())
+}
+
+async fn load_openverse_search(page: &Page, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    page.goto(url, WaitUntil::Load).await?;
+    let snap: OpenverseSnapshot = ready_and_settled_snapshot(page).await?;
+    assert_openverse_initial_snapshot(&snap)?;
+    Ok(())
+}
+
+async fn load_rwa_login(page: &Page, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    page.goto(url, WaitUntil::Load).await?;
+    let snap: RwaSnapshot = ready_and_settled_snapshot(page).await?;
+    assert_rwa_login_snapshot(&snap)?;
     Ok(())
 }
 
@@ -375,7 +732,7 @@ async fn prepare_completed_view(page: &Page) -> Result<(), Box<dyn std::error::E
     wait_settled(page).await?;
     page.locator(".filter-completed").click_auto().await?;
     wait_settled(page).await?;
-    let snap = snapshot(page).await?;
+    let snap: Snapshot = settled_snapshot(page).await?;
     assert_completed_snapshot(&snap)?;
     Ok(())
 }
@@ -385,16 +742,14 @@ async fn run_full_flow(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
     page.locator(".clear-completed").click_auto().await?;
     wait_settled(page).await?;
     page.locator(".filter-all").click_auto().await?;
-    wait_settled(page).await?;
-    let snap = snapshot(page).await?;
+    let snap: Snapshot = settled_snapshot(page).await?;
     assert_final_snapshot(&snap)?;
     Ok(())
 }
 
 async fn conduit_login_to_feed(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
     page.locator(".login-submit").click_auto().await?;
-    wait_settled(page).await?;
-    let snap = conduit_snapshot(page).await?;
+    let snap: ConduitSnapshot = settled_snapshot(page).await?;
     assert_conduit_feed_snapshot(&snap, 42, false)?;
     Ok(())
 }
@@ -403,8 +758,7 @@ async fn conduit_favorite_composite(page: &Page) -> Result<(), Box<dyn std::erro
     page.locator(".favorite-button[data-slug='composite-network-idle']")
         .click_auto()
         .await?;
-    wait_settled(page).await?;
-    let snap = conduit_snapshot(page).await?;
+    let snap: ConduitSnapshot = settled_snapshot(page).await?;
     assert_conduit_feed_snapshot(&snap, 43, true)?;
     Ok(())
 }
@@ -413,8 +767,7 @@ async fn conduit_open_composite_article(page: &Page) -> Result<(), Box<dyn std::
     page.locator(".open-article[data-slug='composite-network-idle']")
         .click_auto()
         .await?;
-    wait_settled(page).await?;
-    let snap = conduit_snapshot(page).await?;
+    let snap: ConduitSnapshot = settled_snapshot(page).await?;
     assert_conduit_article_snapshot(
         &snap,
         &[
@@ -433,8 +786,7 @@ async fn conduit_post_comment(
         .type_text(comment)
         .await?;
     page.locator(".article-comment-submit").click_auto().await?;
-    wait_settled(page).await?;
-    let snap = conduit_snapshot(page).await?;
+    let snap: ConduitSnapshot = settled_snapshot(page).await?;
     assert_conduit_article_snapshot(
         &snap,
         &[
@@ -446,15 +798,73 @@ async fn conduit_post_comment(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn openverse_apply_filters(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    page.locator(".media-image").click_auto().await?;
+    wait_settled(page).await?;
+    page.locator(".license-cc0").click_auto().await?;
+    let snap: OpenverseSnapshot = settled_snapshot(page).await?;
+    assert_openverse_filtered_snapshot(&snap)?;
+    Ok(())
+}
+
+async fn openverse_open_target_detail(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    let selector = format!(".open-detail[data-id='{OPENVERSE_TARGET_ID}']");
+    page.locator(&selector).click_auto().await?;
+    let snap: OpenverseSnapshot = settled_snapshot(page).await?;
+    assert_openverse_detail_snapshot(&snap)?;
+    Ok(())
+}
+
+async fn rwa_login_to_dashboard(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    page.locator(".login-submit").click_auto().await?;
+    let snap: RwaSnapshot = settled_snapshot(page).await?;
+    assert_rwa_dashboard_snapshot(&snap, false)?;
+    Ok(())
+}
+
+async fn rwa_open_composer(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    page.locator(".start-payment").click_auto().await?;
+    let snap: RwaSnapshot = settled_snapshot(page).await?;
+    assert_rwa_dashboard_snapshot(&snap, true)?;
+    Ok(())
+}
+
+async fn rwa_draft_payment(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    page.locator(".payment-recipient")
+        .type_text(RWA_RECIPIENT)
+        .await?;
+    page.locator(".payment-amount")
+        .type_text(RWA_AMOUNT)
+        .await?;
+    page.locator(".payment-note").type_text(RWA_NOTE).await?;
+    Ok(())
+}
+
+async fn rwa_review_payment(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    page.locator(".payment-review").click_auto().await?;
+    let snap: RwaSnapshot = settled_snapshot(page).await?;
+    assert_rwa_review_snapshot(&snap)?;
+    Ok(())
+}
+
+async fn rwa_submit_payment(page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    page.locator(".payment-submit").click_auto().await?;
+    let snap: RwaSnapshot = settled_snapshot(page).await?;
+    assert_rwa_receipt_snapshot(&snap)?;
+    Ok(())
+}
+
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let browser = Browser::launch_chrome(Some(bench_browser_config())).await?;
     let page = browser.new_page().await?;
     let url = todo_url();
     let conduit = conduit_url();
+    let openverse = openverse_url();
+    let rwa = rwa_url();
+    let iters = iterations();
 
-    let mut boot_ready_samples = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
+    let mut boot_ready_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
         let t = Instant::now();
         load_initial_state(&page, &url).await?;
         boot_ready_samples.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -462,8 +872,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let todomvc_boot_ready = stats(boot_ready_samples);
     print_stats("todomvc_boot_ready", &todomvc_boot_ready);
 
-    let mut full_flow_samples = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
+    let mut full_flow_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
         load_initial_state(&page, &url).await?;
         let t = Instant::now();
         run_full_flow(&page).await?;
@@ -472,26 +882,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let todomvc_full_flow = stats(full_flow_samples);
     print_stats("todomvc_full_flow", &todomvc_full_flow);
 
-    let mut settled_screenshot_samples = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
+    let mut settled_screenshot_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
         load_initial_state(&page, &url).await?;
         prepare_completed_view(&page).await?;
         let t = Instant::now();
         page.locator(".filter-active").click_auto().await?;
-        wait_settled(&page).await?;
-        let active_snap = snapshot(&page).await?;
+        let active_snap: Snapshot = settled_snapshot(&page).await?;
         assert_active_filtered_snapshot(&active_snap)?;
-        let png = page.screenshot().await?;
-        if png.len() < 10_000 {
-            return Err(format!("unexpectedly small screenshot: {} bytes", png.len()).into());
-        }
+        capture_png(&page, ScreenshotOptions::fast_png(), 10_000, "screenshot").await?;
         settled_screenshot_samples.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     let todomvc_settled_screenshot = stats(settled_screenshot_samples);
     print_stats("todomvc_settled_screenshot", &todomvc_settled_screenshot);
 
-    let mut conduit_login_ready_samples = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
+    let mut settled_screenshot_conservative_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_initial_state(&page, &url).await?;
+        prepare_completed_view(&page).await?;
+        let t = Instant::now();
+        page.locator(".filter-active").click_auto().await?;
+        let active_snap: Snapshot = settled_snapshot(&page).await?;
+        assert_active_filtered_snapshot(&active_snap)?;
+        capture_png(
+            &page,
+            ScreenshotOptions::default(),
+            10_000,
+            "conservative screenshot",
+        )
+        .await?;
+        settled_screenshot_conservative_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let todomvc_settled_screenshot_conservative_png =
+        stats(settled_screenshot_conservative_samples);
+    print_stats(
+        "todomvc_settled_screenshot_conservative_png",
+        &todomvc_settled_screenshot_conservative_png,
+    );
+
+    let mut conduit_login_ready_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
         let t = Instant::now();
         load_conduit_login(&page, &conduit).await?;
         conduit_login_ready_samples.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -499,8 +929,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conduit_login_ready = stats(conduit_login_ready_samples);
     print_stats("conduit_login_ready", &conduit_login_ready);
 
-    let mut conduit_auth_article_flow_samples = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
+    let mut conduit_auth_article_flow_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
         load_conduit_login(&page, &conduit).await?;
         let t = Instant::now();
         conduit_login_to_feed(&page).await?;
@@ -512,25 +942,190 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conduit_auth_article_flow = stats(conduit_auth_article_flow_samples);
     print_stats("conduit_auth_article_flow", &conduit_auth_article_flow);
 
-    let mut conduit_article_settled_screenshot_samples = Vec::with_capacity(ITERS);
-    for _ in 0..ITERS {
+    let mut conduit_article_settled_screenshot_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
         load_conduit_login(&page, &conduit).await?;
         conduit_login_to_feed(&page).await?;
         conduit_favorite_composite(&page).await?;
         let t = Instant::now();
         conduit_open_composite_article(&page).await?;
-        let png = page.screenshot().await?;
-        if png.len() < 15_000 {
-            return Err(
-                format!("unexpectedly small conduit screenshot: {} bytes", png.len()).into(),
-            );
-        }
+        capture_png(
+            &page,
+            ScreenshotOptions::fast_png(),
+            15_000,
+            "conduit screenshot",
+        )
+        .await?;
         conduit_article_settled_screenshot_samples.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     let conduit_article_settled_screenshot = stats(conduit_article_settled_screenshot_samples);
     print_stats(
         "conduit_article_settled_screenshot",
         &conduit_article_settled_screenshot,
+    );
+
+    let mut conduit_article_settled_screenshot_conservative_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_conduit_login(&page, &conduit).await?;
+        conduit_login_to_feed(&page).await?;
+        conduit_favorite_composite(&page).await?;
+        let t = Instant::now();
+        conduit_open_composite_article(&page).await?;
+        capture_png(
+            &page,
+            ScreenshotOptions::default(),
+            15_000,
+            "conservative conduit screenshot",
+        )
+        .await?;
+        conduit_article_settled_screenshot_conservative_samples
+            .push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let conduit_article_settled_screenshot_conservative_png =
+        stats(conduit_article_settled_screenshot_conservative_samples);
+    print_stats(
+        "conduit_article_settled_screenshot_conservative_png",
+        &conduit_article_settled_screenshot_conservative_png,
+    );
+
+    let mut openverse_search_ready_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        load_openverse_search(&page, &openverse).await?;
+        openverse_search_ready_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let openverse_search_ready = stats(openverse_search_ready_samples);
+    print_stats("openverse_search_ready", &openverse_search_ready);
+
+    let mut openverse_filter_detail_flow_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_openverse_search(&page, &openverse).await?;
+        let t = Instant::now();
+        openverse_apply_filters(&page).await?;
+        openverse_open_target_detail(&page).await?;
+        openverse_filter_detail_flow_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let openverse_filter_detail_flow = stats(openverse_filter_detail_flow_samples);
+    print_stats(
+        "openverse_filter_detail_flow",
+        &openverse_filter_detail_flow,
+    );
+
+    let mut openverse_detail_settled_screenshot_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_openverse_search(&page, &openverse).await?;
+        openverse_apply_filters(&page).await?;
+        let t = Instant::now();
+        openverse_open_target_detail(&page).await?;
+        capture_png(
+            &page,
+            ScreenshotOptions::fast_png(),
+            15_000,
+            "openverse screenshot",
+        )
+        .await?;
+        openverse_detail_settled_screenshot_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let openverse_detail_settled_screenshot = stats(openverse_detail_settled_screenshot_samples);
+    print_stats(
+        "openverse_detail_settled_screenshot",
+        &openverse_detail_settled_screenshot,
+    );
+
+    let mut openverse_detail_settled_screenshot_conservative_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_openverse_search(&page, &openverse).await?;
+        openverse_apply_filters(&page).await?;
+        let t = Instant::now();
+        openverse_open_target_detail(&page).await?;
+        capture_png(
+            &page,
+            ScreenshotOptions::default(),
+            15_000,
+            "conservative openverse screenshot",
+        )
+        .await?;
+        openverse_detail_settled_screenshot_conservative_samples
+            .push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let openverse_detail_settled_screenshot_conservative_png =
+        stats(openverse_detail_settled_screenshot_conservative_samples);
+    print_stats(
+        "openverse_detail_settled_screenshot_conservative_png",
+        &openverse_detail_settled_screenshot_conservative_png,
+    );
+
+    let mut rwa_login_ready_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        load_rwa_login(&page, &rwa).await?;
+        rwa_login_ready_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let rwa_login_ready = stats(rwa_login_ready_samples);
+    print_stats("rwa_login_ready", &rwa_login_ready);
+
+    let mut rwa_payment_flow_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_rwa_login(&page, &rwa).await?;
+        let t = Instant::now();
+        rwa_login_to_dashboard(&page).await?;
+        rwa_open_composer(&page).await?;
+        rwa_draft_payment(&page).await?;
+        rwa_review_payment(&page).await?;
+        rwa_submit_payment(&page).await?;
+        rwa_payment_flow_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let rwa_payment_flow = stats(rwa_payment_flow_samples);
+    print_stats("rwa_payment_flow", &rwa_payment_flow);
+
+    let mut rwa_receipt_settled_screenshot_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_rwa_login(&page, &rwa).await?;
+        rwa_login_to_dashboard(&page).await?;
+        rwa_open_composer(&page).await?;
+        rwa_draft_payment(&page).await?;
+        rwa_review_payment(&page).await?;
+        let t = Instant::now();
+        rwa_submit_payment(&page).await?;
+        capture_png(
+            &page,
+            ScreenshotOptions::fast_png(),
+            15_000,
+            "rwa screenshot",
+        )
+        .await?;
+        rwa_receipt_settled_screenshot_samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let rwa_receipt_settled_screenshot = stats(rwa_receipt_settled_screenshot_samples);
+    print_stats(
+        "rwa_receipt_settled_screenshot",
+        &rwa_receipt_settled_screenshot,
+    );
+
+    let mut rwa_receipt_settled_screenshot_conservative_samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        load_rwa_login(&page, &rwa).await?;
+        rwa_login_to_dashboard(&page).await?;
+        rwa_open_composer(&page).await?;
+        rwa_draft_payment(&page).await?;
+        rwa_review_payment(&page).await?;
+        let t = Instant::now();
+        rwa_submit_payment(&page).await?;
+        capture_png(
+            &page,
+            ScreenshotOptions::default(),
+            15_000,
+            "conservative rwa screenshot",
+        )
+        .await?;
+        rwa_receipt_settled_screenshot_conservative_samples
+            .push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    let rwa_receipt_settled_screenshot_conservative_png =
+        stats(rwa_receipt_settled_screenshot_conservative_samples);
+    print_stats(
+        "rwa_receipt_settled_screenshot_conservative_png",
+        &rwa_receipt_settled_screenshot_conservative_png,
     );
 
     println!(
@@ -542,12 +1137,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "todomvc_boot_ready": stats_to_json(&todomvc_boot_ready),
                 "todomvc_full_flow": stats_to_json(&todomvc_full_flow),
                 "todomvc_settled_screenshot": stats_to_json(&todomvc_settled_screenshot),
+                "todomvc_settled_screenshot_conservative_png": stats_to_json(&todomvc_settled_screenshot_conservative_png),
                 "conduit_login_ready": stats_to_json(&conduit_login_ready),
                 "conduit_auth_article_flow": stats_to_json(&conduit_auth_article_flow),
                 "conduit_article_settled_screenshot": stats_to_json(&conduit_article_settled_screenshot),
+                "conduit_article_settled_screenshot_conservative_png": stats_to_json(&conduit_article_settled_screenshot_conservative_png),
+                "openverse_search_ready": stats_to_json(&openverse_search_ready),
+                "openverse_filter_detail_flow": stats_to_json(&openverse_filter_detail_flow),
+                "openverse_detail_settled_screenshot": stats_to_json(&openverse_detail_settled_screenshot),
+                "openverse_detail_settled_screenshot_conservative_png": stats_to_json(&openverse_detail_settled_screenshot_conservative_png),
+                "rwa_login_ready": stats_to_json(&rwa_login_ready),
+                "rwa_payment_flow": stats_to_json(&rwa_payment_flow),
+                "rwa_receipt_settled_screenshot": stats_to_json(&rwa_receipt_settled_screenshot),
+                "rwa_receipt_settled_screenshot_conservative_png": stats_to_json(&rwa_receipt_settled_screenshot_conservative_png),
             }
         })
     );
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    run().await
 }

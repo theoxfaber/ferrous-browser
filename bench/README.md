@@ -41,6 +41,15 @@ the wait helper returning. It isolates each library's reaction strategy
 
 ```sh
 # Full median-of-medians matrix (3 runs by default)
+cargo run --release --example suite_bench
+
+For ferrous-browser-only work, prefer the direct Rust suite above. It keeps the
+parity and realistic lanes in one direct process and avoids the extra
+parent-process hop that can make browser startup flaky in constrained
+CI/sandbox environments.
+
+For the full cross-library comparison matrix:
+
 node bench/run_matrix.ts
 
 # Opt into Bun-backed Puppeteer / Playwright columns as well

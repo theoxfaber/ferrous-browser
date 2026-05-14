@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-const { spawn } = require('child_process');
 const path = require('path');
+const { runCommandWithRetry } = require('./matrix_retry');
 
 const ROOT = path.resolve(__dirname, '..');
 const RUNS = Number(process.env.RUNS || '3');
@@ -67,6 +67,15 @@ const METRICS = [
   ['conduit_login_ready', 'conduit_login_ready'],
   ['conduit_auth_article_flow', 'conduit_auth_article_flow'],
   ['conduit_article_settled_screenshot', 'conduit_article_settled_screenshot'],
+  ['openverse_search_ready', 'openverse_search_ready'],
+  ['openverse_filter_detail_flow', 'openverse_filter_detail_flow'],
+  [
+    'openverse_detail_settled_screenshot',
+    'openverse_detail_settled_screenshot',
+  ],
+  ['rwa_login_ready', 'rwa_login_ready'],
+  ['rwa_payment_flow', 'rwa_payment_flow'],
+  ['rwa_receipt_settled_screenshot', 'rwa_receipt_settled_screenshot'],
 ];
 
 function median(xs) {
@@ -81,44 +90,6 @@ function formatCell(metric) {
   return `${metric.median.toFixed(1)} ms`;
 }
 
-function runCommand(cwd, cmd) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd[0], cmd.slice(1), {
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      stdout += text;
-      process.stdout.write(text);
-    });
-    child.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      stderr += text;
-      process.stderr.write(text);
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`command failed (${code}): ${cmd.join(' ')}\n${stderr}`));
-        return;
-      }
-      const resultsLine = stdout
-        .split('\n')
-        .find((line) => line.startsWith('RESULTS_JSON '));
-      if (!resultsLine) {
-        reject(new Error(`missing RESULTS_JSON line from: ${cmd.join(' ')}`));
-        return;
-      }
-      resolve(JSON.parse(resultsLine.slice('RESULTS_JSON '.length)));
-    });
-  });
-}
-
 async function main() {
   const runsByLibrary = {};
 
@@ -126,7 +97,7 @@ async function main() {
     runsByLibrary[harness.name] = [];
     for (let i = 0; i < RUNS; i++) {
       console.log(`\n== ${harness.name} realistic run ${i + 1}/${RUNS} ==`);
-      const result = await runCommand(harness.cwd, harness.cmd);
+      const result = await runCommandWithRetry(harness);
       runsByLibrary[harness.name].push(result);
     }
   }

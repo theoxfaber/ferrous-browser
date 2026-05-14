@@ -197,8 +197,7 @@ async fn bench_click_when_enabled(page: &Page) -> Result<Stats, Box<dyn std::err
     Ok(stats(xs))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = bench_browser_config();
 
     let mut cold = Vec::new();
@@ -302,4 +301,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    run().await
 }

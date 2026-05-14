@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ferrous RWA Fixture</title>
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body class="is-booting" data-app-ready="false" data-ui-settled="false" data-route="boot">
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Realistic Fixture</p>
+          <h1>Seeded money flow, no backend drift.</h1>
+          <p class="deck">
+            Login, dashboard, payment review, and receipt state transitions with deterministic delays.
+          </p>
+        </div>
+        <div class="status-cluster">
+          <div class="status-chip route-chip">booting</div>
+          <div class="status-chip user-chip">guest</div>
+        </div>
+      </header>
+
+      <section class="boot-shell" aria-live="polite">
+        <div class="pulse-line wide"></div>
+        <div class="pulse-line mid"></div>
+        <div class="pulse-frame"></div>
+      </section>
+
+      <main class="app-shell" hidden>
+        <section class="panel topbar">
+          <div>
+            <p class="eyebrow">Seeded Full-stack Example</p>
+            <h2>Dashboard and transaction flow</h2>
+          </div>
+          <div class="ready-pill">warming up</div>
+        </section>
+
+        <section class="panel login-view">
+          <div class="copy">
+            <p class="eyebrow">Sign In</p>
+            <h3>Use the fixed demo account</h3>
+            <p class="deck">
+              The flow is shaped like a payment dashboard test, but everything is local and deterministic.
+            </p>
+          </div>
+          <div class="login-card">
+            <label class="field">
+              <span>Email</span>
+              <input class="login-email" type="email" value="demo@ferrous.dev">
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input class="login-password" type="password" value="hyperfine">
+            </label>
+            <button class="login-submit" type="button">Sign in</button>
+          </div>
+        </section>
+
+        <section class="panel dashboard-view" hidden>
+          <div class="dashboard-head">
+            <div>
+              <p class="eyebrow">Overview</p>
+              <h3>Seeded account state</h3>
+            </div>
+            <div class="balance-card">
+              <span class="balance-label">Available balance</span>
+              <span class="balance-value">$18,420.19</span>
+            </div>
+          </div>
+
+          <div class="dashboard-grid">
+            <div class="activity-card">
+              <div class="activity-head">
+                <p class="eyebrow">Recent Activity</p>
+                <button class="start-payment" type="button">New payment</button>
+              </div>
+              <div class="transaction-list" aria-live="polite"></div>
+            </div>
+
+            <div class="composer-card" hidden>
+              <p class="eyebrow">Payment Draft</p>
+              <label class="field">
+                <span>Recipient</span>
+                <input class="payment-recipient" type="text" placeholder="Recipient name">
+              </label>
+              <label class="field">
+                <span>Amount</span>
+                <input class="payment-amount" type="text" placeholder="127.45">
+              </label>
+              <label class="field">
+                <span>Note</span>
+                <textarea class="payment-note" rows="3" placeholder="Purpose"></textarea>
+              </label>
+              <button class="payment-review" type="button">Review payment</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel review-view" hidden>
+          <div class="review-copy">
+            <p class="eyebrow">Review</p>
+            <h3 class="review-title">Drafting</h3>
+            <p class="review-subtitle"></p>
+          </div>
+          <div class="review-summary"></div>
+          <button class="payment-submit" type="button">Submit payment</button>
+        </section>
+
+        <section class="panel receipt-view" hidden>
+          <div class="receipt-head">
+            <div>
+              <p class="eyebrow">Receipt</p>
+              <h3 class="receipt-title">Posted</h3>
+              <p class="receipt-subtitle"></p>
+            </div>
+            <div class="receipt-status">settled</div>
+          </div>
+          <div class="receipt-grid">
+            <div class="receipt-hero">
+              <div class="receipt-badge">payment complete</div>
+              <p class="receipt-id"></p>
+              <p class="receipt-amount"></p>
+            </div>
+            <div class="receipt-ledger">
+              <p class="eyebrow">Ledger excerpt</p>
+              <div class="receipt-transactions" aria-live="polite"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      (() => {
+        const BOOT_DELAY_MS = 220;
+        const LOGIN_DELAY_MS = 150;
+        const REVIEW_DELAY_MS = 120;
+        const SUBMIT_DELAY_MS = 140;
+        const SETTLE_DELAY_MS = 65;
+        const VALID_EMAIL = "demo@ferrous.dev";
+        const VALID_PASSWORD = "hyperfine";
+
+        const seedTransactions = [
+          { id: "TX-3017", title: "Payroll adjustment", amountLabel: "+$2,180.00", status: "posted" },
+          { id: "TX-3016", title: "Operations rent", amountLabel: "-$1,920.00", status: "posted" },
+          { id: "TX-3015", title: "Travel reimbursement", amountLabel: "+$312.40", status: "posted" },
+        ];
+
+        const body = document.body;
+        const bootShell = document.querySelector(".boot-shell");
+        const appShell = document.querySelector(".app-shell");
+        const routeChip = document.querySelector(".route-chip");
+        const userChip = document.querySelector(".user-chip");
+        const readyPill = document.querySelector(".ready-pill");
+        const loginView = document.querySelector(".login-view");
+        const dashboardView = document.querySelector(".dashboard-view");
+        const reviewView = document.querySelector(".review-view");
+        const receiptView = document.querySelector(".receipt-view");
+        const composerCard = document.querySelector(".composer-card");
+        const transactionList = document.querySelector(".transaction-list");
+        const receiptTransactions = document.querySelector(".receipt-transactions");
+        const reviewTitle = document.querySelector(".review-title");
+        const reviewSubtitle = document.querySelector(".review-subtitle");
+        const reviewSummary = document.querySelector(".review-summary");
+        const receiptSubtitle = document.querySelector(".receipt-subtitle");
+        const receiptId = document.querySelector(".receipt-id");
+        const receiptAmount = document.querySelector(".receipt-amount");
+
+        const state = {
+          route: "boot",
+          loggedIn: false,
+          user: null,
+          composerOpen: false,
+          draftRecipient: "",
+          draftAmount: "",
+          draftNote: "",
+          reviewAmountCents: 0,
+          receipt: null,
+          settleToken: 0,
+          pendingRemote: 0,
+          nextPaymentId: 3020,
+          transactions: seedTransactions.map((entry) => ({ ...entry })),
+        };
+
+        function setSettled(value) {
+          body.dataset.uiSettled = value ? "true" : "false";
+          const label = state.route === "boot" ? "booting" : state.route;
+          routeChip.textContent = value ? label : `${label}...`;
+          readyPill.textContent = value ? `${label} settled` : `${label} syncing`;
+        }
+
+        function scheduleSettle() {
+          const token = ++state.settleToken;
+          setSettled(false);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setTimeout(() => {
+                if (token !== state.settleToken || state.pendingRemote > 0) return;
+                setSettled(true);
+              }, SETTLE_DELAY_MS);
+            });
+          });
+        }
+
+        function beginRemoteChange() {
+          state.pendingRemote += 1;
+          setSettled(false);
+        }
+
+        function endRemoteChange() {
+          state.pendingRemote = Math.max(0, state.pendingRemote - 1);
+          render();
+          scheduleSettle();
+        }
+
+        function renderTransactions(target) {
+          target.replaceChildren(
+            ...state.transactions.map((entry) => {
+              const row = document.createElement("article");
+              row.className = "transaction-row";
+
+              const title = document.createElement("p");
+              title.className = "transaction-title";
+              title.textContent = entry.title;
+
+              const meta = document.createElement("div");
+              meta.className = "transaction-meta";
+
+              const id = document.createElement("span");
+              id.textContent = entry.id;
+
+              const amount = document.createElement("span");
+              amount.className = entry.amountLabel.startsWith("-") ? "amount debit" : "amount credit";
+              amount.textContent = entry.amountLabel;
+
+              meta.append(id, amount);
+              row.append(title, meta);
+              return row;
+            }),
+          );
+        }
+
+        function moneyLabel(cents) {
+          return `$${(cents / 100).toFixed(2)}`;
+        }
+
+        function render() {
+          const ready = body.dataset.appReady === "true";
+          body.dataset.route = state.route;
+          bootShell.hidden = ready;
+          appShell.hidden = !ready;
+
+          loginView.hidden = state.route !== "login";
+          dashboardView.hidden = state.route !== "dashboard";
+          reviewView.hidden = state.route !== "review";
+          receiptView.hidden = state.route !== "receipt";
+          composerCard.hidden = !state.composerOpen || state.route !== "dashboard";
+
+          userChip.textContent = state.user ? state.user.name : "guest";
+          renderTransactions(transactionList);
+          renderTransactions(receiptTransactions);
+
+          if (state.route === "review") {
+            reviewTitle.textContent = `Send ${moneyLabel(state.reviewAmountCents)}`;
+            reviewSubtitle.textContent = `Recipient: ${state.draftRecipient}`;
+            reviewSummary.textContent = state.draftNote
+              ? `Note: ${state.draftNote}`
+              : "No note";
+          }
+
+          if (state.route === "receipt" && state.receipt) {
+            receiptSubtitle.textContent = `Recipient: ${state.receipt.recipient}`;
+            receiptId.textContent = state.receipt.id;
+            receiptAmount.textContent = state.receipt.amountLabel;
+          }
+        }
+
+        document.querySelector(".login-submit").addEventListener("click", () => {
+          const email = document.querySelector(".login-email").value.trim();
+          const password = document.querySelector(".login-password").value;
+          if (email !== VALID_EMAIL || password !== VALID_PASSWORD) {
+            scheduleSettle();
+            return;
+          }
+
+          beginRemoteChange();
+          setTimeout(() => {
+            state.loggedIn = true;
+            state.user = { name: "Jordan Vale" };
+            state.route = "dashboard";
+            state.composerOpen = false;
+            endRemoteChange();
+          }, LOGIN_DELAY_MS);
+        });
+
+        document.querySelector(".start-payment").addEventListener("click", () => {
+          state.composerOpen = true;
+          render();
+          scheduleSettle();
+        });
+
+        document.querySelector(".payment-recipient").addEventListener("input", (event) => {
+          state.draftRecipient = event.target.value;
+        });
+        document.querySelector(".payment-amount").addEventListener("input", (event) => {
+          state.draftAmount = event.target.value;
+        });
+        document.querySelector(".payment-note").addEventListener("input", (event) => {
+          state.draftNote = event.target.value;
+        });
+
+        document.querySelector(".payment-review").addEventListener("click", () => {
+          beginRemoteChange();
+          setTimeout(() => {
+            state.reviewAmountCents = Math.round(Number(state.draftAmount || "0") * 100);
+            state.route = "review";
+            endRemoteChange();
+          }, REVIEW_DELAY_MS);
+        });
+
+        document.querySelector(".payment-submit").addEventListener("click", () => {
+          beginRemoteChange();
+          setTimeout(() => {
+            const paymentId = `TX-${state.nextPaymentId++}`;
+            const amountLabel = `-${moneyLabel(state.reviewAmountCents)}`;
+            state.transactions.unshift({
+              id: paymentId,
+              title: `Peer payment to ${state.draftRecipient}`,
+              amountLabel,
+              status: "posted",
+            });
+            state.receipt = {
+              id: paymentId,
+              recipient: state.draftRecipient,
+              amountLabel,
+            };
+            state.route = "receipt";
+            state.composerOpen = false;
+            endRemoteChange();
+          }, SUBMIT_DELAY_MS);
+        });
+
+        window.__bench = {
+          fixture: "rwa",
+          isReady: () => body.dataset.appReady === "true",
+          isSettled: () => body.dataset.uiSettled === "true",
+          snapshot: () => ({
+            ready: body.dataset.appReady === "true",
+            settled: body.dataset.uiSettled === "true",
+            route: state.route,
+            loggedIn: state.loggedIn,
+            skeletonVisible: !bootShell.hidden,
+            loginVisible: !loginView.hidden,
+            dashboardVisible: !dashboardView.hidden,
+            reviewVisible: !reviewView.hidden,
+            receiptVisible: !receiptView.hidden,
+            composerVisible: !composerCard.hidden,
+            userName: state.user ? state.user.name : "guest",
+            transactionTitles: state.transactions.map((entry) => entry.title),
+            draftRecipient: state.draftRecipient,
+            draftAmount: state.draftAmount,
+            draftNote: state.draftNote,
+            reviewAmountCents: state.reviewAmountCents,
+            receiptId: state.receipt ? state.receipt.id : null,
+            receiptAmountLabel: state.receipt ? state.receipt.amountLabel : null,
+            receiptRecipient: state.receipt ? state.receipt.recipient : null,
+          }),
+        };
+
+        setTimeout(() => {
+          body.dataset.appReady = "true";
+          body.classList.remove("is-booting");
+          state.route = "login";
+          render();
+          scheduleSettle();
+        }, BOOT_DELAY_MS);
+      })();
+    </script>
+  </body>
+</html>

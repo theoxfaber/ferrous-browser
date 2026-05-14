@@ -87,3 +87,7 @@ path = "examples/idle_verify.rs"
 [[example]]
 name = "realistic_bench"
 path = "examples/realistic_bench.rs"
+
+[[example]]
+name = "suite_bench"
+path = "examples/suite_bench.rs"
