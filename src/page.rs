@@ -4,11 +4,12 @@ use serde_json::{json, Value};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::time::{timeout, Duration};
 use tracing::Instrument;
 
 use crate::cdp::CDPClient;
-use crate::error::{BrowserError, Result};
+use crate::error::{BrowserError, PageHelperErrorKind, Result};
 
 // ─── P2: WaitUntil enum ──────────────────────────────────────────────────────
 
@@ -73,6 +74,135 @@ pub struct Cookie {
     /// SameSite attribute ("Strict", "Lax", "None")
     #[serde(skip_serializing_if = "Option::is_none", rename = "sameSite")]
     pub same_site: Option<String>,
+}
+
+// ─── P2C: Screenshot ─────────────────────────────────────────────────────────
+
+/// Error returned when a lossy screenshot quality lies outside `0..=100`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("lossy screenshot quality must be between 0 and 100, got {value}")]
+pub struct LossyQualityError {
+    value: u8,
+}
+
+/// Valid quality value for JPEG / WebP screenshot output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LossyQuality(u8);
+
+impl LossyQuality {
+    /// Return the validated raw quality value.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for LossyQuality {
+    type Error = LossyQualityError;
+
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        if value <= 100 {
+            Ok(Self(value))
+        } else {
+            Err(LossyQualityError { value })
+        }
+    }
+}
+
+impl From<LossyQuality> for u8 {
+    fn from(value: LossyQuality) -> Self {
+        value.0
+    }
+}
+
+/// Output encoding for [`Page::screenshot_with_options`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScreenshotEncoding {
+    /// PNG screenshot output.
+    #[default]
+    Png,
+    /// JPEG screenshot output with validated quality.
+    Jpeg {
+        /// Lossy quality for JPEG output.
+        quality: LossyQuality,
+    },
+    /// WebP screenshot output with validated quality.
+    Webp {
+        /// Lossy quality for WebP output.
+        quality: LossyQuality,
+    },
+}
+
+/// Screenshot capture options for [`Page::screenshot_with_options`].
+///
+/// Use [`ScreenshotOptions::default`] for Chrome's conservative PNG path, or
+/// [`ScreenshotOptions::fast_png`] to favor capture speed over file compactness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenshotOptions {
+    /// Output image encoding.
+    pub encoding: ScreenshotEncoding,
+    /// Capture from the compositor surface.
+    pub from_surface: bool,
+    /// Whether Chrome may capture beyond the visible viewport.
+    pub capture_beyond_viewport: bool,
+    /// Whether Chrome should optimize capture for speed.
+    pub optimize_for_speed: bool,
+}
+
+impl Default for ScreenshotOptions {
+    fn default() -> Self {
+        Self {
+            encoding: ScreenshotEncoding::Png,
+            from_surface: true,
+            capture_beyond_viewport: false,
+            optimize_for_speed: false,
+        }
+    }
+}
+
+impl ScreenshotOptions {
+    /// Conservative PNG capture.
+    pub fn png() -> Self {
+        Self::default()
+    }
+
+    /// Speed-oriented PNG capture. This is the policy used by
+    /// [`Page::screenshot`] to keep the default ergonomic API fast.
+    pub fn fast_png() -> Self {
+        Self {
+            optimize_for_speed: true,
+            ..Self::default()
+        }
+    }
+
+    /// Conservative JPEG capture with explicit lossy quality.
+    pub fn jpeg(quality: LossyQuality) -> Self {
+        Self {
+            encoding: ScreenshotEncoding::Jpeg { quality },
+            ..Self::default()
+        }
+    }
+
+    /// Conservative WebP capture with explicit lossy quality.
+    pub fn webp(quality: LossyQuality) -> Self {
+        Self {
+            encoding: ScreenshotEncoding::Webp { quality },
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+enum WaitOutcome {
+    Satisfied,
+    TimedOut,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+enum WaitValueOutcome<T> {
+    Satisfied { value: T },
+    TimedOut,
 }
 
 // ─── P3: Locator ─────────────────────────────────────────────────────────────
@@ -153,14 +283,12 @@ impl Locator {
 
     /// Get the inner text of the element.
     pub async fn inner_text(&self) -> Result<String> {
-        let expr = format!(
-            "document.querySelector('{}')?.innerText ?? ''",
-            escape_selector(&self.selector)
-        );
+        let selector_lit = serde_json::to_string(&self.selector).expect("selector is valid utf-8");
+        let expr = format!("document.querySelector({selector_lit})?.innerText ?? ''");
         let result = self
             .page
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({ "expression": expr, "returnByValue": true })),
             )
             .await?;
@@ -179,15 +307,14 @@ impl Locator {
 
     /// Get an attribute value of the element.
     pub async fn get_attribute(&self, name: &str) -> Result<Option<String>> {
-        let expr = format!(
-            "document.querySelector('{}')?.getAttribute('{}') ?? null",
-            escape_selector(&self.selector),
-            name,
-        );
+        let selector_lit = serde_json::to_string(&self.selector).expect("selector is valid utf-8");
+        let name_lit = serde_json::to_string(name).expect("attribute name is valid utf-8");
+        let expr =
+            format!("document.querySelector({selector_lit})?.getAttribute({name_lit}) ?? null");
         let result = self
             .page
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({ "expression": expr, "returnByValue": true })),
             )
             .await?;
@@ -244,6 +371,10 @@ pub struct Page {
     /// so the composite NetworkIdle signal can wait on the pending-timers
     /// counter as well as network in-flight count.
     timer_script_injected: Arc<InitGuard>,
+    /// One-shot install of DOM utility helpers used by selector waits,
+    /// predicate waits, and auto-click. This keeps the hot path to a small
+    /// function call instead of re-sending the full helper body every time.
+    dom_utils_injected: Arc<InitGuard>,
 }
 
 struct InitGuard {
@@ -290,6 +421,7 @@ impl Page {
             page_enabled: Arc::new(InitGuard::new()),
             network_enabled: Arc::new(InitGuard::new()),
             timer_script_injected: Arc::new(InitGuard::new()),
+            dom_utils_injected: Arc::new(InitGuard::new()),
         }
     }
 
@@ -301,7 +433,7 @@ impl Page {
         let sid = self.session_id.clone();
         self.page_enabled
             .ensure(move || async move {
-                cdp.send_command_with_session(&sid, "Page.enable".to_string(), None)
+                cdp.send_command_with_session(&sid, "Page.enable", None)
                     .await
                     .map(|_| ())
             })
@@ -316,7 +448,7 @@ impl Page {
         let sid = self.session_id.clone();
         self.network_enabled
             .ensure(move || async move {
-                cdp.send_command_with_session(&sid, "Network.enable".to_string(), None)
+                cdp.send_command_with_session(&sid, "Network.enable", None)
                     .await
                     .map(|_| ())
             })
@@ -324,15 +456,21 @@ impl Page {
         Ok(())
     }
 
-    /// Install a document_start wrapper around `setTimeout`/`clearTimeout`
-    /// that maintains `window.__ferrousPending` (an integer count of
-    /// scheduled-but-not-yet-fired timers) and `window.__ferrousAwaitTimers`
-    /// (a Promise that resolves the next moment the pending count hits 0).
+    /// Install a document_start wrapper around timer APIs that maintains
+    /// `window.__ferrousPending` (an integer count of deferred startup work)
+    /// and `window.__ferrousAwaitTimers` (a Promise that resolves the next
+    /// moment the pending count hits 0).
+    ///
+    /// We count `setTimeout` until it fires or is cleared, and `setInterval`
+    /// until its *first* tick or clear. That covers common SPA startup
+    /// patterns like `setInterval(() => { clearInterval(id); fetch(...) })`
+    /// without pinning `NetworkIdle` forever on long-lived pollers.
+    ///
     /// The composite NetworkIdle flush awaits both an animation frame and
-    /// this Promise, so a `setTimeout(fetch, 250)` correctly defers idle
-    /// until after the timer fires AND its scheduled fetch lands. The
-    /// wrapper is only meaningful on documents created *after* it is
-    /// installed; `Page.addScriptToEvaluateOnNewDocument` ensures that.
+    /// this Promise, so deferred work like `setTimeout(fetch, 250)` correctly
+    /// holds idle open until after the timer fires AND its scheduled fetch
+    /// lands. The wrapper is only meaningful on documents created *after* it
+    /// is installed; `Page.addScriptToEvaluateOnNewDocument` ensures that.
     async fn ensure_timer_script_injected(&self) -> Result<()> {
         let cdp = self.cdp.clone();
         let sid = self.session_id.clone();
@@ -356,10 +494,16 @@ impl Page {
   };
   const origST = window.setTimeout;
   const origCT = window.clearTimeout;
+  const origSI = window.setInterval;
+  const origCI = window.clearInterval;
   // Expose the original (unwrapped) setTimeout so internal infrastructure
   // — like the composite NetworkIdle flush — can schedule timers without
   // bumping the user-visible pending counter.
   window.__ferrousRawSetTimeout = origST;
+  const invoke = (fn, thisArg, args) => {
+    if (typeof fn === 'function') return fn.apply(thisArg, args);
+    return window.eval(String(fn));
+  };
   const active = new Set();
   window.setTimeout = function(fn) {
     const delay = arguments[1];
@@ -369,7 +513,7 @@ impl Page {
     const wrapped = function() {
       active.delete(id);
       pending--;
-      try { if (typeof fn === 'function') fn.apply(this, args); }
+      try { invoke(fn, this, args); }
       finally { drain(); }
     };
     id = origST(wrapped, delay);
@@ -380,11 +524,246 @@ impl Page {
     if (active.has(id)) { active.delete(id); pending--; drain(); }
     return origCT(id);
   };
+  const intervals = new Map();
+  window.setInterval = function(fn) {
+    const delay = arguments[1];
+    const args = Array.prototype.slice.call(arguments, 2);
+    pending++;
+    let id;
+    let settled = false;
+    const settle = () => {
+      if (!settled) {
+        settled = true;
+        intervals.delete(id);
+        pending--;
+        drain();
+      }
+    };
+    const wrapped = function() {
+      settle();
+      return invoke(fn, this, args);
+    };
+    id = origSI(wrapped, delay);
+    intervals.set(id, settle);
+    return id;
+  };
+  window.clearInterval = function(id) {
+    const settle = intervals.get(id);
+    if (settle) settle();
+    return origCI(id);
+  };
 })();"#;
                 cdp.send_command_with_session(
                     &sid,
-                    "Page.addScriptToEvaluateOnNewDocument".to_string(),
+                    "Page.addScriptToEvaluateOnNewDocument",
                     Some(json!({ "source": script })),
+                )
+                .await
+                .map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Install DOM utility helpers both for future documents and the current
+    /// one. Realistic-flow benches call `wait_for_function`, `wait_for_selector`,
+    /// and `click_auto` repeatedly on the same page; keeping the heavy
+    /// MutationObserver / rAF logic resident in-page cuts repeated parse /
+    /// compile overhead from those hot paths.
+    async fn ensure_dom_utils_injected(&self) -> Result<()> {
+        let cdp = self.cdp.clone();
+        let sid = self.session_id.clone();
+        self.dom_utils_injected
+            .ensure(move || async move {
+                let script = r#"(() => {
+  if (window.__ferrousWaitForSelector &&
+      window.__ferrousWaitForFunction &&
+      window.__ferrousWaitForFunctionValue &&
+      window.__ferrousClickAuto &&
+      window.__ferrousFocusSelector) {
+    return;
+  }
+  const rawSetTimeout = () => window.__ferrousRawSetTimeout || window.setTimeout;
+  const waitForAnimationFrame = (cb, timeoutMs) => {
+    let done = false;
+    const again = () => {
+      if (!done) {
+        done = true;
+        cb();
+      }
+    };
+    requestAnimationFrame(again);
+    rawSetTimeout().call(window, again, Math.min(50, timeoutMs));
+  };
+  // Bounded LRU-ish cache for compiled predicates. Realistic flows call
+  // wait_for_function* many times with the same handful of source strings;
+  // caching skips the per-call `new Function(...)` parse. Cap keeps memory
+  // bounded for callers that *do* generate unique sources.
+  const fnCache = new Map();
+  const FN_CACHE_MAX = 64;
+  const compileFn = (source) => {
+    let fn = fnCache.get(source);
+    if (fn) {
+      // Refresh recency: re-insert so iteration order tracks usage.
+      fnCache.delete(source);
+      fnCache.set(source, fn);
+      return fn;
+    }
+    fn = new Function(`return (${source});`);
+    fnCache.set(source, fn);
+    if (fnCache.size > FN_CACHE_MAX) {
+      const oldest = fnCache.keys().next().value;
+      fnCache.delete(oldest);
+    }
+    return fn;
+  };
+  window.__ferrousWaitForSelector = (selector, timeoutMs) => new Promise((resolve) => {
+    if (document.querySelector(selector)) {
+      resolve({ state: 'satisfied' });
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      if (document.querySelector(selector)) {
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve({ state: 'satisfied' });
+      }
+    });
+    const timer = rawSetTimeout().call(window, () => {
+      observer.disconnect();
+      resolve({ state: 'timedOut' });
+    }, timeoutMs);
+    observer.observe(document, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+    });
+  });
+  window.__ferrousWaitForFunction = (predicateSource, timeoutMs) => new Promise((resolve, reject) => {
+    const start = performance.now();
+    let predicate;
+    try {
+      predicate = compileFn(predicateSource);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const check = () => {
+      let result;
+      try {
+        result = predicate.call(window);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      if (result) {
+        resolve({ state: 'satisfied' });
+        return;
+      }
+      if (performance.now() - start >= timeoutMs) {
+        resolve({ state: 'timedOut' });
+        return;
+      }
+      waitForAnimationFrame(check, timeoutMs);
+    };
+    check();
+  });
+  window.__ferrousWaitForFunctionValue = (predicateSource, valueSource, timeoutMs) => new Promise((resolve, reject) => {
+    const start = performance.now();
+    let predicate;
+    let valueFn;
+    try {
+      predicate = compileFn(predicateSource);
+      valueFn = compileFn(valueSource);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const check = () => {
+      let ready;
+      try {
+        ready = predicate.call(window);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      if (ready) {
+        try {
+          resolve({ state: 'satisfied', value: valueFn.call(window) });
+        } catch (e) {
+          reject(e);
+        }
+        return;
+      }
+      if (performance.now() - start >= timeoutMs) {
+        resolve({ state: 'timedOut' });
+        return;
+      }
+      waitForAnimationFrame(check, timeoutMs);
+    };
+    check();
+  });
+  window.__ferrousClickAuto = (selector, timeoutMs) => new Promise((resolve) => {
+    const pick = () => {
+      const el = document.querySelector(selector);
+      if (!el || !el.isConnected) return null;
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none') return null;
+      if (parseFloat(style.opacity || '1') === 0) return null;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      return el;
+    };
+    let settled = false;
+    let observer = null;
+    let timer = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (observer) observer.disconnect();
+      if (timer !== null) clearTimeout(timer);
+      resolve(value);
+    };
+    const tryClick = () => {
+      const el = pick();
+      if (el) {
+        el.click();
+        finish({ state: 'satisfied' });
+      }
+    };
+    tryClick();
+    if (settled) return;
+    observer = new MutationObserver(() => tryClick());
+    observer.observe(document, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+    });
+    timer = rawSetTimeout().call(window, () => finish({ state: 'timedOut' }), timeoutMs);
+  });
+  window.__ferrousFocusSelector = (selector) => {
+    const el = document.querySelector(selector);
+    if (!el || !el.isConnected || typeof el.focus !== 'function') {
+      return false;
+    }
+    el.focus();
+    return document.activeElement === el;
+  };
+})();"#;
+                cdp.send_command_with_session(
+                    &sid,
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    Some(json!({ "source": script })),
+                )
+                .await?;
+                cdp.send_command_with_session(
+                    &sid,
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": script,
+                        "returnByValue": true,
+                    })),
                 )
                 .await
                 .map(|_| ())
@@ -468,11 +847,14 @@ impl Page {
         }
 
         let response = self
-            .send_command("Page.navigate".to_string(), Some(json!({ "url": url })))
+            .send_command("Page.navigate", Some(json!({ "url": url })))
             .await?;
 
         if let Some(error_text) = response.get("errorText").and_then(|v| v.as_str()) {
-            return Err(BrowserError::navigation_failed(&url_owned, error_text));
+            return Err(BrowserError::navigation_failed(
+                url_owned.clone(),
+                error_text.to_owned(),
+            ));
         }
 
         let cdp_for_flush = self.cdp.clone();
@@ -594,7 +976,7 @@ impl Page {
                         // a single rAF, matching C5 behaviour.
                         let flush_fut = cdp_for_flush.send_command_with_session(
                             &sid,
-                            "Runtime.evaluate".to_string(),
+                            "Runtime.evaluate",
                             Some(json!({
                                 "expression": r#"(async () => {
     // Race rAF against a raw setTimeout(50). In headless Chrome a
@@ -609,16 +991,47 @@ impl Page {
         requestAnimationFrame(once);
         rawST.call(window, once, 50);
     });
-    if (typeof window.__ferrousAwaitTimers === 'function') {
-        while (window.__ferrousPending > 0) {
-            await window.__ferrousAwaitTimers();
-            await new Promise(r => {
-                let done = false;
-                const once = () => { if (!done) { done = true; r(); } };
-                requestAnimationFrame(once);
-                rawST.call(window, once, 50);
-            });
+    const settleTick = () => new Promise(r => {
+        let done = false;
+        const once = () => { if (!done) { done = true; r(); } };
+        requestAnimationFrame(once);
+        rawST.call(window, once, 50);
+    });
+    const collectAccessibleWindows = (root, out = []) => {
+        out.push(root);
+        const children = root.frames || [];
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            try {
+                void child.location.href;
+                collectAccessibleWindows(child, out);
+            } catch (e) {}
         }
+        return out;
+    };
+    const pendingTimerWindows = () => {
+        const wins = collectAccessibleWindows(window);
+        return wins.filter(w => {
+            try {
+                return typeof w.__ferrousPending === 'number' && w.__ferrousPending > 0;
+            } catch (e) {
+                return false;
+            }
+        });
+    };
+    while (true) {
+        const timedWins = pendingTimerWindows();
+        if (timedWins.length === 0) break;
+        await Promise.all(timedWins.map(w => {
+            try {
+                return typeof w.__ferrousAwaitTimers === 'function'
+                    ? w.__ferrousAwaitTimers()
+                    : Promise.resolve();
+            } catch (e) {
+                return Promise.resolve();
+            }
+        }));
+        await settleTick();
     }
     return true;
 })()"#,
@@ -728,7 +1141,7 @@ impl Page {
     pub async fn evaluate_handle(&self, expression: &str) -> Result<String> {
         let result = self
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({
                     "expression": expression,
                     "returnByValue": false
@@ -742,7 +1155,10 @@ impl Page {
                 .and_then(|e| e.get("description"))
                 .and_then(|d| d.as_str())
                 .unwrap_or("unknown JS exception");
-            return Err(BrowserError::command_failed("Runtime.evaluate", msg));
+            return Err(BrowserError::command_failed(
+                "Runtime.evaluate",
+                msg.to_owned(),
+            ));
         }
 
         result
@@ -777,9 +1193,9 @@ impl Page {
     /// ```
     #[tracing::instrument(level = "info", skip(self), fields(expression_len = expression.len()))]
     pub async fn evaluate<T: DeserializeOwned>(&self, expression: &str) -> Result<T> {
-        let result = self
+        let mut result = self
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({
                     "expression": expression,
                     "returnByValue": true,
@@ -794,13 +1210,22 @@ impl Page {
                 .and_then(|e| e.get("description"))
                 .and_then(|d| d.as_str())
                 .unwrap_or("unknown JS exception");
-            return Err(BrowserError::command_failed("Runtime.evaluate", msg));
+            return Err(BrowserError::command_failed(
+                "Runtime.evaluate",
+                msg.to_owned(),
+            ));
         }
 
-        let value = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .cloned()
+        // Strict on the outer shape, lenient on JS `undefined` → Null. A
+        // missing `result` object means Chrome returned something we don't
+        // understand; a missing `value` field just means the expression
+        // evaluated to undefined and should deserialise like null.
+        let result_obj = result.get_mut("result").ok_or_else(|| {
+            BrowserError::invalid_response("evaluate()", "missing result field in response")
+        })?;
+        let value = result_obj
+            .get_mut("value")
+            .map(std::mem::take)
             .unwrap_or(Value::Null);
 
         serde_json::from_value(value)
@@ -830,36 +1255,14 @@ impl Page {
         selector: &str,
         dur: Duration,
     ) -> Result<()> {
+        self.ensure_dom_utils_injected().await?;
         let timeout_ms = dur.as_millis() as u64;
-        // The selector is interpolated into a JS string literal, so escape
-        // anything that would break out of it. serde_json::to_string gives
-        // us a properly-quoted JS string for free.
         let selector_lit = serde_json::to_string(selector).expect("selector is valid utf-8");
+        let expr = format!("window.__ferrousWaitForSelector({selector_lit}, {timeout_ms})");
 
-        let expr = format!(
-            r#"new Promise((resolve) => {{
-                const sel = {selector_lit};
-                if (document.querySelector(sel)) {{ resolve(true); return; }}
-                const observer = new MutationObserver(() => {{
-                    if (document.querySelector(sel)) {{
-                        observer.disconnect();
-                        clearTimeout(timer);
-                        resolve(true);
-                    }}
-                }});
-                const timer = setTimeout(() => {{
-                    observer.disconnect();
-                    resolve(false);
-                }}, {timeout_ms});
-                observer.observe(document, {{
-                    childList: true, subtree: true, attributes: true
-                }});
-            }})"#
-        );
-
-        let result = self
+        let mut result = self
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({
                     "expression": expr,
                     "returnByValue": true,
@@ -867,20 +1270,20 @@ impl Page {
                 })),
             )
             .await?;
+        if let Some(err) = page_helper_exception("wait_for_selector", &result) {
+            return Err(err);
+        }
 
-        let appeared = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        if appeared {
-            Ok(())
-        } else {
-            Err(BrowserError::timeout(
-                format!("waiting for selector '{selector}'"),
-                dur.as_secs(),
-            ))
+        match parse_page_helper_payload::<WaitOutcome>(&mut result, "wait_for_selector")? {
+            WaitOutcome::Satisfied => Ok(()),
+            WaitOutcome::TimedOut => Err(BrowserError::page_helper(
+                "wait_for_selector",
+                PageHelperErrorKind::TimedOut,
+                format!(
+                    "selector '{selector}' did not appear within {}s",
+                    dur.as_secs()
+                ),
+            )),
         }
     }
 
@@ -892,44 +1295,13 @@ impl Page {
     /// on truthy or `BrowserError::Timeout` on expiry. JS exceptions from
     /// the predicate surface as `BrowserError::CommandFailed`.
     pub async fn wait_for_function(&self, expr: &str, dur: Duration) -> Result<()> {
+        self.ensure_dom_utils_injected().await?;
         let timeout_ms = dur.as_millis() as u64;
-        // Wrap the predicate body in an arrow so the result of `expr` is
-        // returned even when it's a bare expression. We swallow user
-        // exceptions and surface them via Promise.reject so the outer
-        // awaitPromise:true exception path catches them uniformly.
-        let js = format!(
-            r#"new Promise((resolve, reject) => {{
-                const start = performance.now();
-                const timeoutMs = {timeout_ms};
-                const predicate = () => ({expr});
-                const rawST = window.__ferrousRawSetTimeout || window.setTimeout;
-                const check = () => {{
-                    let result;
-                    try {{
-                        result = predicate();
-                    }} catch (e) {{
-                        reject(e); return;
-                    }}
-                    if (result) {{ resolve(true); return; }}
-                    if (performance.now() - start >= timeoutMs) {{
-                        resolve(false); return;
-                    }}
-                    let done = false;
-                    const again = () => {{
-                        if (!done) {{
-                            done = true;
-                            check();
-                        }}
-                    }};
-                    requestAnimationFrame(again);
-                    rawST.call(window, again, Math.min(50, timeoutMs));
-                }};
-                check();
-            }})"#
-        );
-        let result = self
+        let expr_lit = serde_json::to_string(expr).expect("predicate is valid utf-8");
+        let js = format!("window.__ferrousWaitForFunction({expr_lit}, {timeout_ms})");
+        let mut result = self
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({
                     "expression": js,
                     "returnByValue": true,
@@ -937,26 +1309,71 @@ impl Page {
                 })),
             )
             .await?;
-        if let Some(exc) = result.get("exceptionDetails") {
-            let msg = exc
-                .get("exception")
-                .and_then(|e| e.get("description"))
-                .and_then(|d| d.as_str())
-                .unwrap_or("predicate threw");
-            return Err(BrowserError::command_failed("wait_for_function", msg));
+        if let Some(err) = page_helper_exception("wait_for_function", &result) {
+            return Err(err);
         }
-        let truthy = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if truthy {
-            Ok(())
-        } else {
-            Err(BrowserError::timeout(
-                format!("wait_for_function('{expr}')"),
-                dur.as_secs(),
-            ))
+
+        match parse_page_helper_payload::<WaitOutcome>(&mut result, "wait_for_function")? {
+            WaitOutcome::Satisfied => Ok(()),
+            WaitOutcome::TimedOut => Err(BrowserError::page_helper(
+                "wait_for_function",
+                PageHelperErrorKind::TimedOut,
+                format!(
+                    "predicate '{expr}' did not become truthy within {}s",
+                    dur.as_secs()
+                ),
+            )),
+        }
+    }
+
+    /// Wait until a JavaScript predicate becomes truthy, then evaluate and
+    /// return a second JavaScript expression in the same page-side Promise.
+    ///
+    /// This is useful when callers would otherwise do `wait_for_function()`
+    /// and then `evaluate()` back-to-back. Realistic-flow benches use it to
+    /// collapse "wait for app-settled" and "read snapshot" into one CDP
+    /// round-trip.
+    pub async fn wait_for_function_value<T: DeserializeOwned>(
+        &self,
+        predicate_expr: &str,
+        value_expr: &str,
+        dur: Duration,
+    ) -> Result<T> {
+        self.ensure_dom_utils_injected().await?;
+        let timeout_ms = dur.as_millis() as u64;
+        let predicate_lit =
+            serde_json::to_string(predicate_expr).expect("predicate is valid utf-8");
+        let value_lit = serde_json::to_string(value_expr).expect("value expr is valid utf-8");
+        let js = format!(
+            "window.__ferrousWaitForFunctionValue({predicate_lit}, {value_lit}, {timeout_ms})"
+        );
+        let mut result = self
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": js,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+            )
+            .await?;
+        if let Some(err) = page_helper_exception("wait_for_function_value", &result) {
+            return Err(err);
+        }
+
+        match parse_page_helper_payload::<WaitValueOutcome<T>>(
+            &mut result,
+            "wait_for_function_value",
+        )? {
+            WaitValueOutcome::Satisfied { value } => Ok(value),
+            WaitValueOutcome::TimedOut => Err(BrowserError::page_helper(
+                "wait_for_function_value",
+                PageHelperErrorKind::TimedOut,
+                format!(
+                    "predicate '{predicate_expr}' did not become truthy within {}s",
+                    dur.as_secs()
+                ),
+            )),
         }
     }
 
@@ -969,52 +1386,13 @@ impl Page {
         selector: &str,
         dur: Duration,
     ) -> Result<()> {
+        self.ensure_dom_utils_injected().await?;
         let timeout_ms = dur.as_millis() as u64;
         let sel_lit = serde_json::to_string(selector).expect("selector is valid utf-8");
-        let js = format!(
-            r#"new Promise((resolve) => {{
-                const sel = {sel_lit};
-                const timeoutMs = {timeout_ms};
-                function pick() {{
-                    const el = document.querySelector(sel);
-                    if (!el || !el.isConnected) return null;
-                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
-                    const style = getComputedStyle(el);
-                    if (style.visibility === 'hidden' || style.display === 'none') return null;
-                    if (parseFloat(style.opacity || '1') === 0) return null;
-                    const r = el.getBoundingClientRect();
-                    if (r.width === 0 || r.height === 0) return null;
-                    return el;
-                }}
-                let settled = false;
-                let mo = null;
-                let timer = null;
-                function settle(v) {{
-                    if (settled) return;
-                    settled = true;
-                    if (mo) mo.disconnect();
-                    if (timer !== null) clearTimeout(timer);
-                    resolve(v);
-                }}
-                function tryAct() {{
-                    const el = pick();
-                    if (el) {{
-                        el.click();
-                        settle(true);
-                    }}
-                }}
-                tryAct();
-                if (settled) return;
-                mo = new MutationObserver(() => tryAct());
-                mo.observe(document, {{
-                    childList: true, subtree: true, attributes: true
-                }});
-                timer = setTimeout(() => settle(false), timeoutMs);
-            }})"#
-        );
-        let result = self
+        let js = format!("window.__ferrousClickAuto({sel_lit}, {timeout_ms})");
+        let mut result = self
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({
                     "expression": js,
                     "returnByValue": true,
@@ -1022,18 +1400,20 @@ impl Page {
                 })),
             )
             .await?;
-        let ok = result
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if ok {
-            Ok(())
-        } else {
-            Err(BrowserError::timeout(
-                format!("click_auto('{selector}')"),
-                dur.as_secs(),
-            ))
+        if let Some(err) = page_helper_exception("click_auto", &result) {
+            return Err(err);
+        }
+
+        match parse_page_helper_payload::<WaitOutcome>(&mut result, "click_auto")? {
+            WaitOutcome::Satisfied => Ok(()),
+            WaitOutcome::TimedOut => Err(BrowserError::page_helper(
+                "click_auto",
+                PageHelperErrorKind::TimedOut,
+                format!(
+                    "selector '{selector}' did not become actionable within {}s",
+                    dur.as_secs()
+                ),
+            )),
         }
     }
 
@@ -1041,33 +1421,51 @@ impl Page {
 
     /// Click an element matching the selector (internal implementation).
     pub(crate) async fn click_selector(&self, selector: &str) -> Result<()> {
-        let expr = format!(
-            "document.querySelector('{}').click()",
-            escape_selector(selector),
-        );
-        self.send_command(
-            "Runtime.evaluate".to_string(),
-            Some(json!({ "expression": expr })),
-        )
-        .await?;
+        let selector_lit = serde_json::to_string(selector).expect("selector is valid utf-8");
+        let expr = format!("document.querySelector({selector_lit}).click()");
+        self.send_command("Runtime.evaluate", Some(json!({ "expression": expr })))
+            .await?;
         Ok(())
     }
 
     /// Type text into an element (internal implementation).
     pub(crate) async fn type_text_selector(&self, selector: &str, text: &str) -> Result<()> {
-        let focus_expr = format!(
-            "document.querySelector('{}').focus()",
-            escape_selector(selector)
-        );
-        self.send_command(
-            "Runtime.evaluate".to_string(),
-            Some(json!({ "expression": focus_expr })),
-        )
-        .await?;
+        self.ensure_dom_utils_injected().await?;
+        let selector_lit = serde_json::to_string(selector).expect("selector is valid utf-8");
+        let focus_result = self
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": format!("window.__ferrousFocusSelector({selector_lit})"),
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
+        let focused = focus_result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !focused {
+            return Err(BrowserError::command_failed(
+                "type_text",
+                format!("selector '{selector}' did not resolve to a focusable element"),
+            ));
+        }
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let fast_path = self
+            .send_command("Input.insertText", Some(json!({ "text": text })))
+            .await;
+        if fast_path.is_ok() {
+            return Ok(());
+        }
 
         for ch in text.chars() {
             self.send_command(
-                "Input.dispatchKeyEvent".to_string(),
+                "Input.dispatchKeyEvent",
                 Some(json!({
                     "type": "char",
                     "text": ch.to_string(),
@@ -1116,7 +1514,7 @@ impl Page {
     pub async fn content(&self) -> Result<String> {
         let result = self
             .send_command(
-                "Runtime.evaluate".to_string(),
+                "Runtime.evaluate",
                 Some(json!({ "expression": "document.documentElement.outerHTML" })),
             )
             .await?;
@@ -1149,8 +1547,34 @@ impl Page {
     /// ```
     #[tracing::instrument(level = "info", skip(self))]
     pub async fn screenshot(&self) -> Result<Vec<u8>> {
+        self.screenshot_with_options(ScreenshotOptions::fast_png())
+            .await
+    }
+
+    /// Take a screenshot with explicit capture options and return the bytes.
+    #[tracing::instrument(level = "info", skip(self))]
+    pub async fn screenshot_with_options(&self, options: ScreenshotOptions) -> Result<Vec<u8>> {
+        let mut params = json!({
+            "fromSurface": options.from_surface,
+            "captureBeyondViewport": options.capture_beyond_viewport,
+            "optimizeForSpeed": options.optimize_for_speed,
+        });
+        match options.encoding {
+            ScreenshotEncoding::Png => {
+                params["format"] = json!("png");
+            }
+            ScreenshotEncoding::Jpeg { quality } => {
+                params["format"] = json!("jpeg");
+                params["quality"] = json!(quality.get());
+            }
+            ScreenshotEncoding::Webp { quality } => {
+                params["format"] = json!("webp");
+                params["quality"] = json!(quality.get());
+            }
+        }
+
         let result = self
-            .send_command("Page.captureScreenshot".to_string(), None)
+            .send_command("Page.captureScreenshot", Some(params))
             .await?;
 
         let base64_data = result
@@ -1159,7 +1583,7 @@ impl Page {
             .ok_or_else(|| BrowserError::invalid_response("screenshot()", "missing data field"))?;
 
         tracing::info_span!("base64_decode", b64_len = base64_data.len())
-            .in_scope(|| base64_decode(base64_data))
+            .in_scope(|| base64_decode("screenshot()", base64_data))
     }
 
     // ─── Network interception ────────────────────────────────────────────
@@ -1173,10 +1597,10 @@ impl Page {
     where
         F: Fn(&str, &str) -> bool + Send + 'static,
     {
-        let _ = self.send_command("Network.enable".to_string(), None).await;
+        let _ = self.send_command("Network.enable", None).await;
         let _ = self
             .send_command(
-                "Network.setRequestInterception".to_string(),
+                "Network.setRequestInterception",
                 Some(json!({ "patterns": [{ "urlPattern": "*" }] })),
             )
             .await;
@@ -1223,7 +1647,7 @@ impl Page {
                     let _ = cdp
                         .send_command_with_session(
                             &session_id,
-                            cdp_method.to_string(),
+                            cdp_method,
                             Some(json!({ "requestId": request_id })),
                         )
                         .await;
@@ -1258,16 +1682,14 @@ impl Page {
     /// # }
     /// ```
     pub async fn cookies(&self) -> Result<Vec<Cookie>> {
-        let result = self
-            .send_command("Network.getCookies".to_string(), None)
-            .await?;
+        let result = self.send_command("Network.getCookies", None).await?;
 
         let cookies_array = result
             .get("cookies")
             .and_then(|v| v.as_array())
             .ok_or_else(|| BrowserError::invalid_response("cookies()", "missing cookies array"))?;
 
-        let mut cookies = Vec::new();
+        let mut cookies = Vec::with_capacity(cookies_array.len());
         for cookie_val in cookies_array {
             if let Ok(cookie) = serde_json::from_value::<Cookie>(cookie_val.clone()) {
                 cookies.push(cookie);
@@ -1303,37 +1725,35 @@ impl Page {
     /// ```
     pub async fn set_cookies(&self, cookies: &[Cookie]) -> Result<()> {
         // Convert cookies to JSON array with proper formatting for CDP
-        let cookie_params: Vec<Value> = cookies
-            .iter()
-            .map(|c| {
-                let mut obj = json!({
-                    "name": c.name,
-                    "value": c.value,
-                });
-                if let Some(domain) = &c.domain {
-                    obj["domain"] = json!(domain);
-                }
-                if let Some(path) = &c.path {
-                    obj["path"] = json!(path);
-                }
-                if let Some(expires) = c.expires {
-                    obj["expires"] = json!(expires);
-                }
-                if c.secure {
-                    obj["secure"] = json!(true);
-                }
-                if c.http_only {
-                    obj["httpOnly"] = json!(true);
-                }
-                if let Some(same_site) = &c.same_site {
-                    obj["sameSite"] = json!(same_site);
-                }
-                obj
-            })
-            .collect();
+        let mut cookie_params = Vec::with_capacity(cookies.len());
+        for c in cookies {
+            let mut obj = json!({
+                "name": c.name,
+                "value": c.value,
+            });
+            if let Some(domain) = &c.domain {
+                obj["domain"] = json!(domain);
+            }
+            if let Some(path) = &c.path {
+                obj["path"] = json!(path);
+            }
+            if let Some(expires) = c.expires {
+                obj["expires"] = json!(expires);
+            }
+            if c.secure {
+                obj["secure"] = json!(true);
+            }
+            if c.http_only {
+                obj["httpOnly"] = json!(true);
+            }
+            if let Some(same_site) = &c.same_site {
+                obj["sameSite"] = json!(same_site);
+            }
+            cookie_params.push(obj);
+        }
 
         self.send_command(
-            "Network.setCookies".to_string(),
+            "Network.setCookies",
             Some(json!({ "cookies": cookie_params })),
         )
         .await?;
@@ -1416,16 +1836,14 @@ impl Page {
             }
         }
 
-        let result = self
-            .send_command("Page.printToPDF".to_string(), Some(params))
-            .await?;
+        let result = self.send_command("Page.printToPDF", Some(params)).await?;
 
         let base64_data = result
             .get("data")
             .and_then(|v| v.as_str())
             .ok_or_else(|| BrowserError::invalid_response("pdf()", "missing data field"))?;
 
-        base64_decode(base64_data)
+        base64_decode("pdf()", base64_data)
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────
@@ -1433,7 +1851,7 @@ impl Page {
     /// Send a command to this page's session
     pub(crate) async fn send_command(
         &self,
-        method: String,
+        method: &'static str,
         params: Option<Value>,
     ) -> Result<Value> {
         self.cdp
@@ -1444,18 +1862,59 @@ impl Page {
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-/// Escape single-quotes in a CSS selector used inside JS string literals.
-fn escape_selector(s: &str) -> String {
-    s.replace('\'', "\\'")
+fn page_helper_exception(helper: &'static str, response: &Value) -> Option<BrowserError> {
+    response.get("exceptionDetails").map(|exception| {
+        let details = exception
+            .get("exception")
+            .and_then(|value| value.get("description"))
+            .and_then(|value| value.as_str())
+            .or_else(|| exception.get("text").and_then(|value| value.as_str()))
+            .unwrap_or("helper threw");
+        BrowserError::page_helper(
+            helper,
+            PageHelperErrorKind::JavaScriptException,
+            details.to_owned(),
+        )
+    })
+}
+
+fn take_runtime_result_value(response: &mut Value, helper: &'static str) -> Result<Value> {
+    response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("value"))
+        .map(std::mem::take)
+        .ok_or_else(|| {
+            BrowserError::page_helper(
+                helper,
+                PageHelperErrorKind::MissingPayload,
+                "missing result.value payload",
+            )
+        })
+}
+
+fn parse_page_helper_payload<T: DeserializeOwned>(
+    response: &mut Value,
+    helper: &'static str,
+) -> Result<T> {
+    let payload = take_runtime_result_value(response, helper)?;
+    serde_json::from_value(payload).map_err(|error| {
+        BrowserError::page_helper(
+            helper,
+            PageHelperErrorKind::InvalidPayload,
+            error.to_string(),
+        )
+    })
 }
 
 /// Decode base64 string to bytes
-fn base64_decode(s: &str) -> Result<Vec<u8>> {
+fn base64_decode(context: &'static str, s: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
-    engine.decode(s).map_err(|e| {
-        BrowserError::invalid_response("screenshot()", format!("base64 decode failed: {e}"))
-    })
+    let mut out = Vec::with_capacity(s.len().saturating_mul(3) / 4);
+    engine.decode_vec(s, &mut out).map_err(|e| {
+        BrowserError::invalid_response(context, format!("base64 decode failed: {e}"))
+    })?;
+    Ok(out)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1471,12 +1930,37 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_selector_plain() {
-        assert_eq!(escape_selector("button#id"), "button#id");
+    fn test_screenshot_options_default_is_conservative_png() {
+        let opts = ScreenshotOptions::default();
+        assert_eq!(opts.encoding, ScreenshotEncoding::Png);
+        assert!(opts.from_surface);
+        assert!(!opts.capture_beyond_viewport);
+        assert!(!opts.optimize_for_speed);
     }
 
     #[test]
-    fn test_escape_selector_quotes() {
-        assert_eq!(escape_selector("input[name='q']"), "input[name=\\'q\\']");
+    fn test_screenshot_options_fast_png_enables_speed_flag() {
+        let opts = ScreenshotOptions::fast_png();
+        assert_eq!(opts.encoding, ScreenshotEncoding::Png);
+        assert!(opts.optimize_for_speed);
+        assert!(opts.from_surface);
+        assert!(!opts.capture_beyond_viewport);
+    }
+
+    #[test]
+    fn test_lossy_quality_rejects_values_above_100() {
+        let err = LossyQuality::try_from(101).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "lossy screenshot quality must be between 0 and 100, got 101"
+        );
+    }
+
+    #[test]
+    fn test_screenshot_options_jpeg_carries_validated_quality() {
+        let quality = LossyQuality::try_from(80).unwrap();
+        let opts = ScreenshotOptions::jpeg(quality);
+        assert_eq!(opts.encoding, ScreenshotEncoding::Jpeg { quality });
+        assert!(!opts.optimize_for_speed);
     }
 }

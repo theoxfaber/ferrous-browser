@@ -10,6 +10,7 @@ categories = ["web-programming", "api-bindings"]
 readme = "README.md"
 
 [dependencies]
+backon = "1.6"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 serde = { version = "1", features = ["derive"] }

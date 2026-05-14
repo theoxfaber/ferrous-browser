@@ -1,5 +1,6 @@
 use futures_util::SinkExt;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -16,7 +17,7 @@ pub struct CDPRequest {
     /// Unique request ID
     pub id: u32,
     /// CDP method name
-    pub method: String,
+    pub method: Cow<'static, str>,
     /// Optional parameters for the method
     pub params: Option<Value>,
     /// Optional session ID for targeting specific pages
@@ -25,10 +26,10 @@ pub struct CDPRequest {
 
 impl CDPRequest {
     /// Create a new CDP request
-    pub fn new(id: u32, method: String, params: Option<Value>) -> Self {
+    pub fn new(id: u32, method: &'static str, params: Option<Value>) -> Self {
         Self {
             id,
-            method,
+            method: Cow::Borrowed(method),
             params,
             session_id: None,
         }
@@ -37,13 +38,13 @@ impl CDPRequest {
     /// Create a CDP request with session ID
     pub fn with_session(
         id: u32,
-        method: String,
+        method: &'static str,
         params: Option<Value>,
         session_id: String,
     ) -> Self {
         Self {
             id,
-            method,
+            method: Cow::Borrowed(method),
             params,
             session_id: Some(session_id),
         }
@@ -189,7 +190,7 @@ impl CDPClient {
     > {
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.ws_url)
             .await
-            .map_err(|e| BrowserError::connection_failed(&self.ws_url, e.to_string()))?;
+            .map_err(|e| BrowserError::connection_failed(self.ws_url.clone(), e.to_string()))?;
 
         Ok(ws_stream)
     }
@@ -222,11 +223,11 @@ impl CDPClient {
     ///
     /// The response handler is registered **before** the message is sent so
     /// that fast Chrome replies are never dropped.
-    #[tracing::instrument(level = "info", skip(self, params), fields(method = %method, id))]
-    pub async fn send_command(&self, method: String, params: Option<Value>) -> Result<Value> {
+    #[tracing::instrument(level = "info", skip(self, params), fields(method = method, id))]
+    pub async fn send_command(&self, method: &'static str, params: Option<Value>) -> Result<Value> {
         let id = self.next_id();
         tracing::Span::current().record("id", id);
-        let request = CDPRequest::new(id, method.clone(), params);
+        let request = CDPRequest::new(id, method, params);
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
@@ -241,7 +242,7 @@ impl CDPClient {
             match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(_)) => Err(BrowserError::command_failed(
-                    &method,
+                    method,
                     "response channel closed unexpectedly",
                 )),
                 Err(_) => {
@@ -262,16 +263,16 @@ impl CDPClient {
     /// Send a command to a specific page session.
     ///
     /// The response handler is registered **before** the message is sent.
-    #[tracing::instrument(level = "info", skip(self, params), fields(method = %method, id, session_id = %session_id))]
+    #[tracing::instrument(level = "info", skip(self, params), fields(method = method, id, session_id = %session_id))]
     pub async fn send_command_with_session(
         &self,
         session_id: &str,
-        method: String,
+        method: &'static str,
         params: Option<Value>,
     ) -> Result<Value> {
         let id = self.next_id();
         tracing::Span::current().record("id", id);
-        let request = CDPRequest::with_session(id, method.clone(), params, session_id.to_string());
+        let request = CDPRequest::with_session(id, method, params, session_id.to_string());
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
@@ -286,7 +287,7 @@ impl CDPClient {
             match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(_)) => Err(BrowserError::command_failed(
-                    &method,
+                    method,
                     "response channel closed unexpectedly",
                 )),
                 Err(_) => {
@@ -400,7 +401,7 @@ mod tests {
     fn test_cdp_request_creation() {
         let req = CDPRequest::new(
             1,
-            "Page.navigate".to_string(),
+            "Page.navigate",
             Some(json!({"url": "https://example.com"})),
         );
         assert_eq!(req.id, 1);
@@ -412,7 +413,7 @@ mod tests {
     fn test_cdp_request_to_json() {
         let req = CDPRequest::new(
             1,
-            "Page.navigate".to_string(),
+            "Page.navigate",
             Some(json!({"url": "https://example.com"})),
         );
         let json = req.to_json();
@@ -450,7 +451,7 @@ mod tests {
     fn test_cdp_request_with_session() {
         let req = CDPRequest::with_session(
             2,
-            "Runtime.evaluate".to_string(),
+            "Runtime.evaluate",
             Some(json!({"expression": "1+1"})),
             "SES001".to_string(),
         );

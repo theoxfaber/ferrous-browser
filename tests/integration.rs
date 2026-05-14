@@ -2,14 +2,14 @@
 /// These require Chrome running on localhost:9222
 #[cfg(test)]
 mod tests {
-    use ferrous_browser::{Browser, BrowserConfig, BrowserError, WaitUntil};
+    use ferrous_browser::{Browser, BrowserConfig, BrowserError, PageHelperErrorKind, WaitUntil};
     use tokio::time::Duration;
 
     /// Helper: skip gracefully if Chrome is not running
     fn is_chrome_unavailable(e: &BrowserError) -> bool {
         matches!(
             e,
-            BrowserError::ConnectionFailed { .. } | BrowserError::BrowserNotLaunched(_)
+            BrowserError::ConnectionFailed { .. } | BrowserError::BrowserNotLaunched { .. }
         )
     }
 
@@ -215,7 +215,10 @@ mod tests {
                             .await
                         {
                             Ok(_) => println!("⊘ Unexpected success for invalid selector"),
-                            Err(BrowserError::Timeout { .. }) => {
+                            Err(BrowserError::PageHelperFailure {
+                                kind: PageHelperErrorKind::TimedOut,
+                                ..
+                            }) => {
                                 println!("✓ Correctly timed out for invalid selector")
                             }
                             Err(e) => println!("⊘ Unexpected error: {}", e),

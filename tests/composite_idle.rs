@@ -60,8 +60,8 @@ async fn launch_or_skip() -> Option<LaunchedBrowser> {
             browser,
             _permit: permit,
         }),
-        Err(BrowserError::BrowserNotLaunched(msg)) => {
-            eprintln!("⊘ skipping: chrome not launchable: {msg}");
+        Err(BrowserError::BrowserNotLaunched { message, .. }) => {
+            eprintln!("⊘ skipping: chrome not launchable: {message}");
             drop(permit);
             None
         }
@@ -366,13 +366,11 @@ clearTimeout(id);
     assert!(elapsed < Duration::from_millis(200), "took {elapsed:?}");
 }
 
-/// T1.11 — setInterval present. KNOWN GAP: not instrumented today, so the
-/// page can issue periodic fetches that the composite signal won't wait for.
-/// Test asserts the *current* behaviour with a short outer budget so a
-/// future fix (instrumenting setInterval) flips this test rather than
-/// silently changing semantics.
+/// T1.11 — setInterval-driven startup work. Count the interval until its
+/// first tick (or clear) so one-shot bootstrap work deferred through an
+/// interval is still observed without pinning forever on long-lived pollers.
 #[tokio::test]
-async fn t1_setinterval_known_gap() {
+async fn t1_setinterval_first_tick() {
     let Some(browser) = launch_or_skip().await else {
         return;
     };
@@ -380,29 +378,35 @@ async fn t1_setinterval_known_gap() {
 
     let html = r#"<!doctype html><html><body><script>
 window.__ticks = 0;
-setInterval(() => { window.__ticks++; }, 100);
+window.__fetched = 0;
+const id = setInterval(() => {
+  window.__ticks++;
+  clearInterval(id);
+  fetch('data:text/plain,interval-first-tick').then(() => { window.__fetched++; });
+}, 100);
 </script></body></html>"#;
 
-    // Current behaviour: idle fires promptly because setInterval doesn't
-    // increment __ferrousPending. So elapsed should be small (no wait on
-    // the interval). When this test starts failing, it means we extended
-    // the wrapper to track intervals — at which point this test should be
-    // rewritten to assert the new behaviour.
     let elapsed = timed_goto(&page, &data_url(html), Duration::from_secs(3), "t1.11").await;
-    assert!(
-        elapsed < Duration::from_millis(200),
-        "expected prompt return; took {elapsed:?}"
-    );
     let ticks: u64 = page.evaluate("window.__ticks").await.unwrap();
-    // No assertion on `ticks` — just documenting the gap.
-    eprintln!("ℹ setInterval ticked {} times before goto returned", ticks);
+    let fetched: u64 = page.evaluate("window.__fetched").await.unwrap();
+    assert_eq!(ticks, 1, "goto should wait through the first interval tick");
+    assert_eq!(
+        fetched, 1,
+        "interval-scheduled fetch should complete before idle"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "should have waited for the first interval tick; took {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_millis(700), "took {elapsed:?}");
 }
 
-/// T1.12 — adversarial setTimeout rebind. Page reassigns window.setTimeout
-/// AFTER our wrapper runs at document_start. Our pending counter no longer
-/// tracks future calls. Document the failure mode behind a short timeout.
+/// T1.12 — iframe-borrowed raw setTimeout. A page can bypass the top
+/// window's wrapped `setTimeout` by borrowing the raw implementation from a
+/// child frame, but the composite flush now drains accessible child frames
+/// too, so the deferred fetch must still be observed.
 #[tokio::test]
-async fn t1_adversarial_rebind_known_gap() {
+async fn t1_iframe_borrowed_timeout() {
     let Some(browser) = launch_or_skip().await else {
         return;
     };
@@ -422,53 +426,58 @@ rawST.call(window, () => {
 
     let elapsed = timed_goto(&page, &data_url(html), Duration::from_secs(3), "t1.12").await;
     let fetched: u64 = page.evaluate("window.__fetched").await.unwrap();
-    // Current behaviour: idle fires before the iframe's setTimeout-driven
-    // fetch completes, so the deferred fetch goes unobserved. Don't pin
-    // this to a <200 ms wall-clock budget — load+rAF overhead can drift
-    // slightly across hosts even when the behavioural gap is still present.
-    // When this starts failing, it means we extended the wrapper to cover
-    // iframe-borrowed timers.
-    assert_eq!(fetched, 0, "expected the evaded fetch to remain unobserved");
+    assert_eq!(
+        fetched, 1,
+        "iframe-borrowed timer should keep idle open until its fetch lands"
+    );
     assert!(
-        elapsed < Duration::from_secs(1),
-        "unexpectedly slow return: {elapsed:?}"
+        elapsed >= Duration::from_millis(200),
+        "should have waited for the borrowed timer; took {elapsed:?}"
     );
-    eprintln!(
-        "ℹ adversarial rebind: idle fired with __fetched={} (expected 1 for full coverage)",
-        fetched
-    );
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
 }
 
-/// T1.13 — iframe with its own setTimeout-deferred fetch. KNOWN GAP:
-/// __ferrousPending is per-window; top frame can't see the iframe's pending
-/// timers. Document the gap.
+/// T1.13 — same-origin iframe with its own deferred fetch. The timer wrapper
+/// runs in each document, and the composite flush now drains accessible child
+/// frames too, so iframe bootstrap work must be observed before idle fires.
 #[tokio::test]
-async fn t1_iframe_settimeout_known_gap() {
+async fn t1_iframe_settimeout() {
     let Some(browser) = launch_or_skip().await else {
         return;
     };
+    let server = TestServer::spawn().await;
     let page = browser.new_page().await.unwrap();
 
-    let inner =
-        r#"<script>setTimeout(() => fetch('data:text/plain,iframe-deferred'), 200);</script>"#;
+    let inner = r#"<!doctype html><html><body><script>
+setTimeout(() => {
+    fetch('data:text/plain,iframe-deferred').then(() => { parent.__iframeFetched++; });
+}, 200);
+</script></body></html>"#;
+    let inner_url = server.url(&format!("/page?html={}", urlencode(inner)));
     let outer_html = format!(
         r#"<!doctype html><html><body>
-<iframe srcdoc='{}'></iframe>
+<script>window.__iframeFetched = 0;</script>
+<iframe src={:?}></iframe>
 </body></html>"#,
-        inner.replace('\'', "&apos;")
+        inner_url
     );
 
     let elapsed = timed_goto(
         &page,
-        &data_url(&outer_html),
-        Duration::from_secs(3),
+        &host_page(&server, &outer_html),
+        Duration::from_secs(5),
         "t1.13",
     )
     .await;
-    // Idle fires before the iframe's deferred fetch. Top-frame
-    // __ferrousPending == 0 even though the iframe has one pending timer.
-    eprintln!("ℹ iframe gap: idle fired in {:?}", elapsed);
-    // Sanity: timing budget is loose so future fixes that DO wait can pass too.
+    let fetched: u64 = page.evaluate("window.__iframeFetched").await.unwrap();
+    assert_eq!(
+        fetched, 1,
+        "iframe deferred fetch must complete before idle"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(200),
+        "should have waited on the iframe timer; took {elapsed:?}"
+    );
     assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
 }
 
@@ -744,10 +753,12 @@ w.onopen = () => {{ window.__opened++; w.send('hi'); }};
             );
         }
         Ok(_) if elapsed < Duration::from_secs(2) => {
-            // OK: WebSocket open does not pin the counter. Verify the
-            // socket actually opened so we know the page ran end-to-end.
-            let opened: u64 = page.evaluate("window.__opened").await.unwrap();
-            assert!(opened >= 1, "ws.onopen should have fired");
+            // OK: WebSocket open does not pin the counter. `goto` can beat
+            // `onopen` to the finish line, so wait briefly for the page-side
+            // signal instead of reading it immediately.
+            page.wait_for_function("window.__opened >= 1", Duration::from_secs(2))
+                .await
+                .expect("ws.onopen should have fired shortly after goto");
         }
         other => panic!("unexpected outcome from WebSocket goto: {other:?} after {elapsed:?}"),
     }
