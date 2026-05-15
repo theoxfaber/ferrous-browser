@@ -112,8 +112,11 @@ pub mod browser;
 pub mod page;
 
 pub use browser::{Browser, BrowserConfig};
-pub use error::{BrowserError, ResultExt};
-pub use page::{Cookie, Locator, Page, WaitUntil};
+pub use error::{BrowserError, BrowserLaunchErrorKind, PageHelperErrorKind, ResultExt};
+pub use page::{
+    Cookie, Locator, LossyQuality, LossyQualityError, Page, ScreenshotEncoding, ScreenshotOptions,
+    WaitUntil,
+};
 
 #[cfg(test)]
 mod tests {

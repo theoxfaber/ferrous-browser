@@ -10,6 +10,7 @@ categories = ["web-programming", "api-bindings"]
 readme = "README.md"
 
 [dependencies]
+backon = "1.6"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +36,10 @@ env_logger = "0.11"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Chrome-trace-format JSON. Open at https://ui.perfetto.dev or chrome://tracing
 tracing-chrome = "0.7"
+# Local HTTP fixture for composite_idle integration tests (Tier 2).
+axum = { version = "0.7", features = ["ws"] }
+tokio-stream = "0.1"
+realistic_server = { path = "bench/realistic_server" }
 
 [features]
 default = []
@@ -67,3 +72,23 @@ path = "examples/wait_bench.rs"
 [[example]]
 name = "parity_bench"
 path = "examples/parity_bench.rs"
+
+[[example]]
+name = "experiments_bench"
+path = "examples/experiments_bench.rs"
+
+[[example]]
+name = "lifecycle_probe"
+path = "examples/lifecycle_probe.rs"
+
+[[example]]
+name = "idle_verify"
+path = "examples/idle_verify.rs"
+
+[[example]]
+name = "realistic_bench"
+path = "examples/realistic_bench.rs"
+
+[[example]]
+name = "suite_bench"
+path = "examples/suite_bench.rs"

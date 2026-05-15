@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Livewire Benchmark</title>
+    <link rel="stylesheet" href="../signalboard/app.css" />
+    <style>
+      :root {
+        --canvas: #edf3f5;
+        --panel: rgba(247, 252, 252, 0.92);
+        --panel-strong: #ffffff;
+        --brand: #005f73;
+        --brand-soft: rgba(0, 95, 115, 0.12);
+      }
+
+      .note-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 16px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(0, 95, 115, 0.08);
+        color: var(--brand);
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .detail-list {
+        display: grid;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .detail-item {
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.7);
+        border: 1px solid rgba(21, 33, 43, 0.08);
+      }
+
+      .detail-item strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+    </style>
+  </head>
+  <body
+    data-app-ready="false"
+    data-ui-settled="false"
+    data-network-quiet="false"
+    data-detail-ready="false"
+    data-detail-settled="false"
+  >
+    <div id="app"></div>
+    <script>
+      const API_ORIGIN = "https://jsonplaceholder.typicode.com";
+      const TARGET_CARD_ID = 11;
+      const runKey = new URLSearchParams(location.search).get("run") || "0";
+      let requestSeq = 0;
+
+      const HERO_EAST_IMAGE = "https://picsum.photos/id/1039/900/560";
+      const HERO_WEST_IMAGE = "https://picsum.photos/id/1043/900/560";
+      const DETAIL_CHART_IMAGE = "https://picsum.photos/id/1060/960/560";
+      const PREFETCH_ATLAS_IMAGE = "https://picsum.photos/id/1025/1600/1100";
+      const PREFETCH_ARCHIVE_IMAGE = "https://picsum.photos/id/1033/1600/1100";
+
+      const state = {
+        profile: null,
+        cards: [],
+        alerts: [],
+        activity: [],
+        heroImages: {
+          east: null,
+          west: null,
+        },
+        hiddenPrefetchesLoaded: 0,
+        backfillDone: false,
+        digestDone: false,
+        view: "overview",
+        detail: {
+          id: null,
+          title: null,
+          owner: null,
+          summary: null,
+          comments: [],
+          ready: false,
+          chartSrc: null,
+          chartLoaded: false,
+          auditDone: false,
+        },
+        pendingRequests: 0,
+      };
+
+      function targetCard() {
+        return state.cards.find((card) => card.id === TARGET_CARD_ID) || null;
+      }
+
+      function heroImagesLoaded() {
+        return Number(Boolean(state.heroImages.east)) + Number(Boolean(state.heroImages.west));
+      }
+
+      function overviewReady() {
+        return state.profile !== null && state.cards.length === 6 && state.activity.length === 4;
+      }
+
+      function overviewSettled() {
+        return overviewReady() && state.alerts.length === 3 && heroImagesLoaded() === 2;
+      }
+
+      function overviewQuiet() {
+        return overviewSettled()
+          && state.backfillDone
+          && state.digestDone
+          && state.pendingRequests === 0;
+      }
+
+      function detailReady() {
+        return state.view === "detail" && state.detail.ready;
+      }
+
+      function detailSettled() {
+        return detailReady() && state.detail.chartLoaded;
+      }
+
+      function detailQuiet() {
+        return detailSettled() && state.detail.auditDone && state.pendingRequests === 0;
+      }
+
+      function syncBackgroundProgress() {
+        state.digestDone = state.backfillDone && state.hiddenPrefetchesLoaded === 2;
+      }
+
+      function syncDatasets() {
+        document.body.dataset.appReady = overviewReady() ? "true" : "false";
+        document.body.dataset.uiSettled = (state.view === "detail" ? detailSettled() : overviewSettled()) ? "true" : "false";
+        document.body.dataset.networkQuiet = (state.view === "detail" ? detailQuiet() : overviewQuiet()) ? "true" : "false";
+        document.body.dataset.detailReady = detailReady() ? "true" : "false";
+        document.body.dataset.detailSettled = detailSettled() ? "true" : "false";
+      }
+
+      function beginPending() {
+        state.pendingRequests += 1;
+        syncDatasets();
+      }
+
+      function endPending() {
+        state.pendingRequests = Math.max(0, state.pendingRequests - 1);
+        syncDatasets();
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function excerpt(value, max = 110) {
+        const compact = String(value).replace(/\s+/g, " ").trim();
+        if (compact.length <= max) {
+          return compact;
+        }
+        return compact.slice(0, max - 1) + "…";
+      }
+
+      function remoteJsonUrl(path) {
+        const url = new URL(path, API_ORIGIN);
+        url.searchParams.set("_bench", runKey + ":" + requestSeq);
+        requestSeq += 1;
+        return url.toString();
+      }
+
+      function cacheBustedAsset(urlText) {
+        const url = new URL(urlText);
+        url.searchParams.set("bench", runKey + ":" + requestSeq);
+        requestSeq += 1;
+        return url.toString();
+      }
+
+      async function fetchJson(path) {
+        beginPending();
+        try {
+          const response = await fetch(remoteJsonUrl(path), {
+            cache: "no-store",
+            referrerPolicy: "no-referrer",
+          });
+          if (!response.ok) {
+            throw new Error("unexpected response " + response.status);
+          }
+          return await response.json();
+        } finally {
+          endPending();
+        }
+      }
+
+      function loadAsset(urlText, onload) {
+        beginPending();
+        const image = new Image();
+        image.decoding = "async";
+        image.referrerPolicy = "no-referrer";
+        image.onload = () => {
+          onload(image.currentSrc || image.src);
+          endPending();
+          render();
+        };
+        image.onerror = () => {
+          endPending();
+          render();
+        };
+        image.src = cacheBustedAsset(urlText);
+      }
+
+      function syncDetailReady() {
+        state.detail.ready = Boolean(
+          state.detail.id !== null
+            && state.detail.title
+            && state.detail.owner
+            && state.detail.comments.length === 3,
+        );
+      }
+
+      function renderCards() {
+        if (!state.cards.length) {
+          return '<div class="card-skel"></div><div class="card-skel"></div><div class="card-skel"></div>';
+        }
+        return state.cards.map((card) => (
+          '<article class="card' + (card.id === TARGET_CARD_ID ? " card-target" : "") + '">'
+            + "<div>"
+              + '<div class="badge-row">'
+                + '<span class="badge">' + escapeHtml(card.tag) + "</span>"
+                + '<span class="delta">post #' + card.id + "</span>"
+              + "</div>"
+              + "<h3>" + escapeHtml(card.title) + "</h3>"
+              + "<p>" + escapeHtml(card.summary) + "</p>"
+            + "</div>"
+            + '<button class="card-action open-detail" data-id="' + card.id + '"' + (overviewReady() ? "" : " disabled") + ">"
+              + "Open detail"
+            + "</button>"
+          + "</article>"
+        )).join("");
+      }
+
+      function renderAlerts() {
+        if (!state.alerts.length) {
+          return '<div class="rail-skel"></div><div class="rail-skel"></div><div class="rail-skel"></div>';
+        }
+        return state.alerts.map((alert) => (
+          '<div class="rail-item">'
+            + "<strong>" + escapeHtml(alert.title) + "</strong>"
+            + "<p>" + escapeHtml(alert.summary) + "</p>"
+          + "</div>"
+        )).join("");
+      }
+
+      function renderActivity() {
+        if (!state.activity.length) {
+          return '<div class="rail-skel"></div><div class="rail-skel"></div><div class="rail-skel"></div><div class="rail-skel"></div>';
+        }
+        return state.activity.map((item) => (
+          '<div class="activity-item">'
+            + "<strong>" + escapeHtml(item.title) + "</strong>"
+            + "<p>" + escapeHtml(item.summary) + "</p>"
+          + "</div>"
+        )).join("");
+      }
+
+      function renderDetail() {
+        if (state.view !== "detail") {
+          return "";
+        }
+        if (!state.detail.ready) {
+          return '<div class="detail-skel"></div>';
+        }
+        const chartMarkup = state.detail.chartSrc
+          ? '<div class="chart-frame"><img src="' + state.detail.chartSrc + '" alt="" /></div>'
+          : '<div class="chart-skel"></div>';
+        return (
+          '<div class="detail-shell">'
+            + '<section class="detail-card">'
+              + '<p class="eyebrow">Live Detail</p>'
+              + "<h2>" + escapeHtml(state.detail.title) + "</h2>"
+              + '<div class="detail-meta">'
+                + "<strong>Owner</strong>"
+                + "<p>" + escapeHtml(state.detail.owner) + "</p>"
+              + "</div>"
+              + '<p class="hero-summary">' + escapeHtml(state.detail.summary) + "</p>"
+              + '<div class="detail-list">'
+                + state.detail.comments.map((comment) => (
+                  '<div class="detail-item">'
+                    + "<strong>" + escapeHtml(comment.title) + "</strong>"
+                    + "<p>" + escapeHtml(comment.summary) + "</p>"
+                  + "</div>"
+                )).join("")
+              + "</div>"
+              + chartMarkup
+            + "</section>"
+            + '<aside class="status-panel">'
+              + "<strong>Live network</strong>"
+              + "<p>Detail readiness waits on post, author, and comments. Screenshot readiness also waits on a real remote image.</p>"
+              + '<p class="tiny">Background audit: ' + (state.detail.auditDone ? "complete" : "in flight") + "</p>"
+              + '<p class="tiny">Pending requests: ' + state.pendingRequests + "</p>"
+            + "</aside>"
+          + "</div>"
+        );
+      }
+
+      function render() {
+        const profileName = state.profile ? state.profile.name : "Connecting to live sources…";
+        const profileSummary = state.profile
+          ? "Remote profile and workload fan-out are live. Background fetches continue after the overview becomes usable."
+          : "Starting live overview via jsonplaceholder and remote images.";
+
+        document.getElementById("app").innerHTML = (
+          '<div class="shell">'
+            + '<header class="hero">'
+              + "<section>"
+                + '<p class="eyebrow">Livewire</p>'
+                + "<h1>" + escapeHtml(profileName) + "</h1>"
+                + '<p class="hero-summary">' + escapeHtml(profileSummary) + "</p>"
+                + '<div class="note-pill">Live internet requests only: no local API proxy, no fixture-backed JSON.</div>'
+                + '<div class="kpi-row">'
+                  + '<div class="kpi"><span class="kpi-label">Cards</span><span class="kpi-value">' + (state.cards.length || "…") + "</span></div>"
+                  + '<div class="kpi"><span class="kpi-label">Activity</span><span class="kpi-value">' + (state.activity.length || "…") + "</span></div>"
+                  + '<div class="kpi"><span class="kpi-label">Pending</span><span class="kpi-value">' + state.pendingRequests + "</span></div>"
+                + "</div>"
+              + "</section>"
+              + '<section class="hero-media">'
+                + (state.heroImages.east
+                  ? '<div class="media-frame"><img src="' + state.heroImages.east + '" alt="" /></div>'
+                  : '<div class="media-skel"></div>')
+                + (state.heroImages.west
+                  ? '<div class="media-frame"><img src="' + state.heroImages.west + '" alt="" /></div>'
+                  : '<div class="media-skel"></div>')
+              + "</section>"
+            + "</header>"
+            + '<div class="grid">'
+              + '<section class="stack">'
+                + '<div class="panel">'
+                  + '<div class="section-head"><h2>Remote cards</h2><p>Interaction-ready once live cards and activity rows hydrate.</p></div>'
+                  + '<div class="card-grid">' + renderCards() + "</div>"
+                + "</div>"
+                + '<div class="panel">'
+                  + '<div class="section-head"><h3>Live activity</h3><p>Visual settle waits on remote images and commentary, not the background digest chain.</p></div>'
+                  + '<div class="activity-list">' + renderActivity() + "</div>"
+                + "</div>"
+                + renderDetail()
+              + "</section>"
+              + '<aside class="panel rail">'
+                + '<div class="section-head"><h3>Alert rail</h3><p>All rows below come from live comment payloads over the public internet.</p></div>'
+                + '<div class="rail-list">' + renderAlerts() + "</div>"
+              + "</aside>"
+            + "</div>"
+          + "</div>"
+        );
+
+        for (const button of document.querySelectorAll(".open-detail")) {
+          button.addEventListener("click", () => openDetail(Number(button.dataset.id)));
+        }
+
+        syncDatasets();
+      }
+
+      async function openDetail(id) {
+        if (id !== TARGET_CARD_ID) {
+          return;
+        }
+        state.view = "detail";
+        state.detail = {
+          id,
+          title: null,
+          owner: null,
+          summary: null,
+          comments: [],
+          ready: false,
+          chartSrc: null,
+          chartLoaded: false,
+          auditDone: false,
+        };
+        render();
+
+        void fetchJson("/posts/" + encodeURIComponent(id)).then((payload) => {
+          state.detail.id = payload.id;
+          state.detail.title = payload.title;
+          state.detail.summary = excerpt(payload.body, 180);
+          syncDetailReady();
+          render();
+
+          return fetchJson("/users/" + encodeURIComponent(payload.userId)).then((owner) => {
+            state.detail.owner = owner.name;
+            syncDetailReady();
+            render();
+          });
+        });
+
+        void fetchJson("/comments?postId=" + encodeURIComponent(id) + "&_limit=3").then((payload) => {
+          state.detail.comments = payload.map((comment) => ({
+            title: comment.name,
+            summary: excerpt(comment.body, 96),
+          }));
+          syncDetailReady();
+          render();
+        });
+
+        loadAsset(DETAIL_CHART_IMAGE, (src) => {
+          state.detail.chartSrc = src;
+          state.detail.chartLoaded = true;
+        });
+
+        void fetchJson("/albums/2").then(() => {
+          return fetchJson("/todos/" + encodeURIComponent(id));
+        }).then(() => {
+          state.detail.auditDone = true;
+          render();
+        });
+      }
+
+      async function boot() {
+        render();
+
+        const profile = await fetchJson("/users/2");
+        state.profile = {
+          name: profile.name,
+          company: profile.company && profile.company.name ? profile.company.name : "Live company",
+        };
+        render();
+
+        void fetchJson("/posts?_start=10&_limit=6").then((payload) => {
+          state.cards = payload.map((post) => ({
+            id: post.id,
+            title: post.title,
+            summary: excerpt(post.body, 112),
+            tag: post.id === TARGET_CARD_ID ? "target" : "remote",
+          }));
+          render();
+        });
+
+        void fetchJson("/todos?_start=0&_limit=4").then((payload) => {
+          state.activity = payload.map((item) => ({
+            title: item.title,
+            summary: item.completed ? "Marked complete on the remote list." : "Still open in the remote queue.",
+          }));
+          render();
+        });
+
+        void fetchJson("/comments?postId=" + TARGET_CARD_ID + "&_limit=3").then((payload) => {
+          state.alerts = payload.map((comment) => ({
+            title: comment.email,
+            summary: excerpt(comment.body, 88),
+          }));
+          render();
+        });
+
+        void fetchJson("/albums/1").then(() => {
+          return fetchJson("/photos?_start=0&_limit=24");
+        }).then(() => {
+          return Promise.all([
+            fetchJson("/posts?_start=40&_limit=10"),
+            fetchJson("/comments?_start=80&_limit=20"),
+            fetchJson("/users/7"),
+          ]);
+        }).then(() => {
+          state.backfillDone = true;
+          syncBackgroundProgress();
+          render();
+        });
+
+        loadAsset(HERO_EAST_IMAGE, (src) => {
+          state.heroImages.east = src;
+        });
+
+        loadAsset(HERO_WEST_IMAGE, (src) => {
+          state.heroImages.west = src;
+        });
+
+        loadAsset(PREFETCH_ATLAS_IMAGE, () => {
+          state.hiddenPrefetchesLoaded += 1;
+          syncBackgroundProgress();
+        });
+
+        loadAsset(PREFETCH_ARCHIVE_IMAGE, () => {
+          state.hiddenPrefetchesLoaded += 1;
+          syncBackgroundProgress();
+        });
+      }
+
+      window.__bench = {
+        snapshot() {
+          const target = targetCard();
+          return {
+            ready: overviewReady(),
+            settled: state.view === "detail" ? detailSettled() : overviewSettled(),
+            networkQuiet: state.view === "detail" ? detailQuiet() : overviewQuiet(),
+            view: state.view,
+            profileLoaded: state.profile !== null,
+            cardsVisible: state.cards.length,
+            alertsVisible: state.alerts.length,
+            activityVisible: state.activity.length,
+            heroImagesLoaded: heroImagesLoaded(),
+            hiddenPrefetchesLoaded: state.hiddenPrefetchesLoaded,
+            backfillDone: state.backfillDone,
+            digestDone: state.digestDone,
+            pendingRequests: state.pendingRequests,
+            targetCardId: TARGET_CARD_ID,
+            targetCardTitle: target ? target.title : null,
+            detailVisible: state.view === "detail",
+            detailId: state.detail.id,
+            detailTitle: state.detail.title,
+            detailOwner: state.detail.owner,
+            detailCommentCount: state.detail.comments.length,
+            detailReady: state.detail.ready,
+            detailChartLoaded: state.detail.chartLoaded,
+            detailAuditDone: state.detail.auditDone,
+          };
+        },
+      };
+
+      boot().catch((error) => {
+        console.error(error);
+      });
+    </script>
+  </body>
+</html>

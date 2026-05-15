@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Signalboard Benchmark</title>
+    <link rel="stylesheet" href="./app.css" />
+  </head>
+  <body
+    data-app-ready="false"
+    data-ui-settled="false"
+    data-network-quiet="false"
+    data-detail-ready="false"
+    data-detail-settled="false"
+  >
+    <div id="app"></div>
+    <script>
+      const TARGET_CARD_ID = "latency-lab";
+      const TARGET_CARD_TITLE = "Latency Lab";
+      const runKey = new URLSearchParams(location.search).get("run") || "0";
+
+      const state = {
+        heroTitle: "Signalboard",
+        heroSummary: "Booting regional service health dashboard...",
+        kpis: [],
+        cards: [],
+        alerts: [],
+        activity: [],
+        heroImages: {
+          east: null,
+          west: null,
+        },
+        insightsDone: false,
+        prefetchDone: false,
+        view: "overview",
+        detail: {
+          id: null,
+          title: null,
+          owner: null,
+          summary: null,
+          stages: [],
+          ready: false,
+          chartSrc: null,
+          chartLoaded: false,
+          auditDone: false,
+          auditWindow: null,
+        },
+        pendingRequests: 0,
+      };
+
+      function withRun(path) {
+        const url = new URL(path, location.origin);
+        url.searchParams.set("run", runKey);
+        return url.toString();
+      }
+
+      function heroImagesLoaded() {
+        return Number(Boolean(state.heroImages.east)) + Number(Boolean(state.heroImages.west));
+      }
+
+      function overviewReady() {
+        return state.cards.length === 3 && state.activity.length === 4;
+      }
+
+      function overviewSettled() {
+        return overviewReady() && state.alerts.length === 2 && heroImagesLoaded() === 2;
+      }
+
+      function overviewQuiet() {
+        return overviewSettled()
+          && state.insightsDone
+          && state.prefetchDone
+          && state.pendingRequests === 0;
+      }
+
+      function detailReady() {
+        return state.view === "detail" && state.detail.ready;
+      }
+
+      function detailSettled() {
+        return detailReady() && state.detail.chartLoaded;
+      }
+
+      function detailQuiet() {
+        return detailSettled() && state.detail.auditDone && state.pendingRequests === 0;
+      }
+
+      function syncDatasets() {
+        document.body.dataset.appReady = overviewReady() ? "true" : "false";
+        document.body.dataset.uiSettled = (state.view === "detail" ? detailSettled() : overviewSettled()) ? "true" : "false";
+        document.body.dataset.networkQuiet = (state.view === "detail" ? detailQuiet() : overviewQuiet()) ? "true" : "false";
+        document.body.dataset.detailReady = detailReady() ? "true" : "false";
+        document.body.dataset.detailSettled = detailSettled() ? "true" : "false";
+      }
+
+      function beginPending() {
+        state.pendingRequests += 1;
+        syncDatasets();
+      }
+
+      function endPending() {
+        state.pendingRequests = Math.max(0, state.pendingRequests - 1);
+        syncDatasets();
+      }
+
+      async function fetchJson(path) {
+        beginPending();
+        try {
+          const response = await fetch(withRun(path), {
+            cache: "no-store",
+          });
+          if (!response.ok) {
+            throw new Error("unexpected response " + response.status);
+          }
+          return await response.json();
+        } finally {
+          endPending();
+        }
+      }
+
+      function loadAsset(path, onload) {
+        beginPending();
+        const image = new Image();
+        image.decoding = "async";
+        image.onload = () => {
+          onload(image.src);
+          endPending();
+          render();
+        };
+        image.onerror = () => {
+          endPending();
+          render();
+        };
+        image.src = withRun(path);
+      }
+
+      function formatStagePills(stages) {
+        return stages.map((stage) => '<span class="stage-pill">' + stage + "</span>").join("");
+      }
+
+      function renderKpis() {
+        if (!state.kpis.length) {
+          return [
+            '<div class="kpi"><span class="kpi-label">Regions</span><span class="kpi-value">...</span></div>',
+            '<div class="kpi"><span class="kpi-label">Queues</span><span class="kpi-value">...</span></div>',
+            '<div class="kpi"><span class="kpi-label">Edge</span><span class="kpi-value">...</span></div>',
+          ].join("");
+        }
+        return state.kpis.map((kpi) => (
+          '<div class="kpi">'
+            + '<span class="kpi-label">' + kpi.label + "</span>"
+            + '<span class="kpi-value">' + kpi.value + "</span>"
+          + "</div>"
+        )).join("");
+      }
+
+      function renderCards() {
+        if (!state.cards.length) {
+          return '<div class="card-skel"></div><div class="card-skel"></div><div class="card-skel"></div>';
+        }
+        return state.cards.map((card) => (
+          '<article class="card' + (card.id === TARGET_CARD_ID ? " card-target" : "") + '">'
+            + '<div>'
+              + '<div class="badge-row">'
+                + '<span class="badge">' + card.status + "</span>"
+                + '<span class="delta">' + card.delta + "</span>"
+              + "</div>"
+              + "<h3>" + card.title + "</h3>"
+              + "<p>" + card.summary + "</p>"
+            + "</div>"
+            + '<button class="card-action open-detail" data-id="' + card.id + '"' + (overviewReady() ? "" : " disabled") + ">"
+              + card.cta
+            + "</button>"
+          + "</article>"
+        )).join("");
+      }
+
+      function renderAlerts() {
+        if (!state.alerts.length) {
+          return '<div class="rail-skel"></div><div class="rail-skel"></div>';
+        }
+        return state.alerts.map((alert) => (
+          '<div class="rail-item">'
+            + "<strong>" + alert.title + "</strong>"
+            + "<p>" + alert.summary + "</p>"
+          + "</div>"
+        )).join("");
+      }
+
+      function renderActivity() {
+        if (!state.activity.length) {
+          return '<div class="rail-skel"></div><div class="rail-skel"></div><div class="rail-skel"></div><div class="rail-skel"></div>';
+        }
+        return state.activity.map((item) => (
+          '<div class="activity-item">'
+            + "<strong>" + item.title + "</strong>"
+            + "<p>" + item.summary + "</p>"
+          + "</div>"
+        )).join("");
+      }
+
+      function renderDetail() {
+        if (state.view !== "detail") {
+          return "";
+        }
+        if (!state.detail.ready) {
+          return '<div class="detail-skel"></div>';
+        }
+        const chartMarkup = state.detail.chartSrc
+          ? '<div class="chart-frame"><img src="' + state.detail.chartSrc + '" alt="" /></div>'
+          : '<div class="chart-skel"></div>';
+        return (
+          '<div class="detail-shell">'
+            + '<section class="detail-card">'
+              + '<p class="eyebrow">Detail Panel</p>'
+              + "<h2>" + state.detail.title + "</h2>"
+              + '<div class="detail-meta">'
+                + "<strong>Owner</strong>"
+                + "<p>" + state.detail.owner + "</p>"
+              + "</div>"
+              + '<p class="hero-summary">' + state.detail.summary + "</p>"
+              + '<div class="stage-list">' + formatStagePills(state.detail.stages) + "</div>"
+              + chartMarkup
+            + "</section>"
+            + '<aside class="status-panel">'
+              + "<strong>Audit Window</strong>"
+              + "<p>" + state.detail.auditWindow + "</p>"
+              + '<p class="tiny">Background audit: ' + (state.detail.auditDone ? "complete" : "in flight") + "</p>"
+              + '<p class="tiny">Pending requests: ' + state.pendingRequests + "</p>"
+            + "</aside>"
+          + "</div>"
+        );
+      }
+
+      function render() {
+        document.getElementById("app").innerHTML = (
+          '<div class="shell">'
+            + '<header class="hero">'
+              + '<section>'
+                + '<p class="eyebrow">Signalboard</p>'
+                + "<h1>" + state.heroTitle + "</h1>"
+                + '<p class="hero-summary">' + state.heroSummary + "</p>"
+                + '<div class="kpi-row">' + renderKpis() + "</div>"
+              + "</section>"
+              + '<section class="hero-media">'
+                + (state.heroImages.east
+                  ? '<div class="media-frame"><img src="' + state.heroImages.east + '" alt="" /></div>'
+                  : '<div class="media-skel"></div>')
+                + (state.heroImages.west
+                  ? '<div class="media-frame"><img src="' + state.heroImages.west + '" alt="" /></div>'
+                  : '<div class="media-skel"></div>')
+              + "</section>"
+            + "</header>"
+            + '<div class="grid">'
+              + '<section class="stack">'
+                + '<div class="panel">'
+                  + '<div class="section-head"><h2>Regional cards</h2><p>Interaction-ready once cards and activity hydrate.</p></div>'
+                  + '<div class="card-grid">' + renderCards() + "</div>"
+                + "</div>"
+                + '<div class="panel">'
+                  + '<div class="section-head"><h3>Recent activity</h3><p>Visual settle waits for hero media, not background insights.</p></div>'
+                  + '<div class="activity-list">' + renderActivity() + "</div>"
+                + "</div>"
+                + renderDetail()
+              + "</section>"
+              + '<aside class="panel rail">'
+                + '<div class="section-head"><h3>Alert rail</h3><p>Background fetches continue after the view is usable.</p></div>'
+                + '<div class="rail-list">' + renderAlerts() + "</div>"
+              + "</aside>"
+            + "</div>"
+          + "</div>"
+        );
+
+        for (const button of document.querySelectorAll(".open-detail")) {
+          button.addEventListener("click", () => openDetail(button.dataset.id));
+        }
+
+        syncDatasets();
+      }
+
+      async function openDetail(id) {
+        if (id !== TARGET_CARD_ID) {
+          return;
+        }
+        state.view = "detail";
+        state.detail = {
+          id,
+          title: null,
+          owner: null,
+          summary: null,
+          stages: [],
+          ready: false,
+          chartSrc: null,
+          chartLoaded: false,
+          auditDone: false,
+          auditWindow: null,
+        };
+        render();
+
+        void fetchJson("/signalboard/api/detail?id=" + encodeURIComponent(id)).then((payload) => {
+          state.detail.id = payload.id;
+          state.detail.title = payload.title;
+          state.detail.owner = payload.owner;
+          state.detail.summary = payload.summary;
+          state.detail.stages = payload.stages;
+          state.detail.auditWindow = payload.auditWindow;
+          state.detail.ready = true;
+          render();
+        });
+
+        loadAsset("/signalboard/assets/detail-chart.svg", (src) => {
+          state.detail.chartSrc = src;
+          state.detail.chartLoaded = true;
+        });
+
+        void fetchJson("/signalboard/api/detail-audit?id=" + encodeURIComponent(id)).then(() => {
+          state.detail.auditDone = true;
+          render();
+        });
+      }
+
+      async function boot() {
+        render();
+        const bootstrap = await fetchJson("/signalboard/api/bootstrap");
+        state.heroTitle = bootstrap.heroTitle;
+        state.heroSummary = bootstrap.heroSummary;
+        state.kpis = bootstrap.kpis;
+        render();
+
+        void fetchJson("/signalboard/api/cards").then((payload) => {
+          state.cards = payload.cards;
+          render();
+        });
+
+        void fetchJson("/signalboard/api/alerts").then((payload) => {
+          state.alerts = payload.alerts;
+          render();
+        });
+
+        void fetchJson("/signalboard/api/activity").then((payload) => {
+          state.activity = payload.activity;
+          render();
+        });
+
+        void fetchJson("/signalboard/api/insights").then(() => {
+          state.insightsDone = true;
+          render();
+        });
+
+        void fetchJson("/signalboard/api/prefetch").then(() => {
+          state.prefetchDone = true;
+          render();
+        });
+
+        loadAsset("/signalboard/assets/hero-east.svg", (src) => {
+          state.heroImages.east = src;
+        });
+
+        loadAsset("/signalboard/assets/hero-west.svg", (src) => {
+          state.heroImages.west = src;
+        });
+      }
+
+      window.__bench = {
+        snapshot() {
+          return {
+            ready: overviewReady(),
+            settled: state.view === "detail" ? detailSettled() : overviewSettled(),
+            networkQuiet: state.view === "detail" ? detailQuiet() : overviewQuiet(),
+            view: state.view,
+            cardsVisible: state.cards.length,
+            alertsVisible: state.alerts.length,
+            activityVisible: state.activity.length,
+            heroImagesLoaded: heroImagesLoaded(),
+            insightsDone: state.insightsDone,
+            prefetchDone: state.prefetchDone,
+            pendingRequests: state.pendingRequests,
+            targetCardId: TARGET_CARD_ID,
+            targetCardTitle: TARGET_CARD_TITLE,
+            detailVisible: state.view === "detail",
+            detailId: state.detail.id,
+            detailTitle: state.detail.title,
+            detailOwner: state.detail.owner,
+            detailStageCount: state.detail.stages.length,
+            detailReady: state.detail.ready,
+            detailChartLoaded: state.detail.chartLoaded,
+            detailAuditDone: state.detail.auditDone,
+          };
+        },
+      };
+
+      boot().catch((error) => {
+        console.error(error);
+      });
+    </script>
+  </body>
+</html>

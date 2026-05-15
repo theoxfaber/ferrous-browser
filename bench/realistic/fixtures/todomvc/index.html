@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ferrous TodoMVC Fixture</title>
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body class="is-booting" data-app-ready="false" data-ui-settled="false">
+    <div class="page-shell">
+      <section class="hero">
+        <p class="eyebrow">Realistic Fixture</p>
+        <h1>TodoMVC, but benchmark-shaped.</h1>
+        <p class="deck">
+          Deliberately boot-delayed, interaction-heavy, and visually obvious when
+          you shoot too early.
+        </p>
+      </section>
+
+      <section class="boot-shell" aria-live="polite">
+        <div class="pulse-bar wide"></div>
+        <div class="pulse-bar mid"></div>
+        <div class="pulse-card"></div>
+      </section>
+
+      <main class="todoapp" hidden>
+        <div class="app-head">
+          <div>
+            <p class="eyebrow">Scenario One</p>
+            <h2>Flow baseline</h2>
+          </div>
+          <div class="ready-badge">warming up</div>
+        </div>
+
+        <div class="composer">
+          <input
+            class="new-todo"
+            type="text"
+            placeholder="Queue a task"
+            aria-label="New todo"
+          >
+          <button class="add-todo" type="button">Add todo</button>
+        </div>
+
+        <ul class="todo-list" aria-live="polite"></ul>
+
+        <footer class="toolbar">
+          <p class="todo-count">0 items left</p>
+          <div class="filters" role="group" aria-label="Filters">
+            <button class="filter-chip filter-all is-active" data-filter="all" type="button">All</button>
+            <button class="filter-chip filter-active" data-filter="active" type="button">Active</button>
+            <button class="filter-chip filter-completed" data-filter="completed" type="button">Completed</button>
+          </div>
+          <button class="clear-completed" type="button">Clear completed</button>
+        </footer>
+      </main>
+    </div>
+    <script>
+      (() => {
+        const BOOT_DELAY_MS = 180;
+        const SETTLE_DELAY_MS = 60;
+        const seedTodos = [
+          { id: 1, title: "Map realistic flows", completed: false },
+          { id: 2, title: "Ship stable waits", completed: true },
+          { id: 3, title: "Audit launch overhead", completed: false },
+        ];
+
+        const body = document.body;
+        const bootShell = document.querySelector(".boot-shell");
+        const app = document.querySelector(".todoapp");
+        const input = document.querySelector(".new-todo");
+        const addButton = document.querySelector(".add-todo");
+        const list = document.querySelector(".todo-list");
+        const count = document.querySelector(".todo-count");
+        const readyBadge = document.querySelector(".ready-badge");
+        const clearCompleted = document.querySelector(".clear-completed");
+        const filterButtons = Array.from(document.querySelectorAll(".filter-chip"));
+
+        const state = {
+          filter: "all",
+          nextId: 4,
+          todos: [],
+          settleToken: 0,
+        };
+
+        function visibleTodos() {
+          if (state.filter === "active") {
+            return state.todos.filter((todo) => !todo.completed);
+          }
+          if (state.filter === "completed") {
+            return state.todos.filter((todo) => todo.completed);
+          }
+          return state.todos;
+        }
+
+        function activeCount() {
+          return state.todos.filter((todo) => !todo.completed).length;
+        }
+
+        function completedCount() {
+          return state.todos.filter((todo) => todo.completed).length;
+        }
+
+        function render() {
+          const todos = visibleTodos();
+          list.replaceChildren(
+            ...todos.map((todo) => {
+              const item = document.createElement("li");
+              item.className = `todo-row${todo.completed ? " completed" : ""}`;
+              item.dataset.id = String(todo.id);
+
+              const meta = document.createElement("div");
+              meta.className = "todo-meta";
+
+              const toggle = document.createElement("input");
+              toggle.className = "toggle";
+              toggle.type = "checkbox";
+              toggle.checked = todo.completed;
+              toggle.setAttribute("aria-label", `Toggle ${todo.title}`);
+
+              const title = document.createElement("span");
+              title.className = "title";
+              title.textContent = todo.title;
+
+              meta.append(toggle, title);
+
+              const pill = document.createElement("span");
+              pill.className = "status-pill";
+              pill.textContent = todo.completed ? "done" : "active";
+
+              item.append(meta, pill);
+              return item;
+            }),
+          );
+
+          const active = activeCount();
+          count.textContent = `${active} item${active === 1 ? "" : "s"} left`;
+
+          for (const button of filterButtons) {
+            const isActive = button.dataset.filter === state.filter;
+            button.classList.toggle("is-active", isActive);
+          }
+
+          clearCompleted.hidden = completedCount() === 0;
+          readyBadge.textContent =
+            body.dataset.uiSettled === "true"
+              ? `${state.filter} settled`
+              : `${state.filter} settling`;
+        }
+
+        function markSettled(value) {
+          body.dataset.uiSettled = value ? "true" : "false";
+          body.classList.toggle("is-settling", !value);
+          readyBadge.textContent = value
+            ? `${state.filter} settled`
+            : `${state.filter} settling`;
+        }
+
+        function scheduleSettle() {
+          const token = ++state.settleToken;
+          markSettled(false);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setTimeout(() => {
+                if (token !== state.settleToken) {
+                  return;
+                }
+                markSettled(true);
+              }, SETTLE_DELAY_MS);
+            });
+          });
+        }
+
+        function addTodo() {
+          const title = input.value.trim();
+          if (!title) {
+            return;
+          }
+          state.todos.push({
+            id: state.nextId++,
+            title,
+            completed: false,
+          });
+          input.value = "";
+          render();
+          scheduleSettle();
+        }
+
+        addButton.addEventListener("click", addTodo);
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            addTodo();
+          }
+        });
+
+        list.addEventListener("change", (event) => {
+          const toggle = event.target.closest(".toggle");
+          if (!toggle) {
+            return;
+          }
+          const item = toggle.closest(".todo-row");
+          const id = Number(item?.dataset.id);
+          const todo = state.todos.find((candidate) => candidate.id === id);
+          if (!todo) {
+            return;
+          }
+          todo.completed = toggle.checked;
+          render();
+          scheduleSettle();
+        });
+
+        for (const button of filterButtons) {
+          button.addEventListener("click", () => {
+            state.filter = button.dataset.filter || "all";
+            render();
+            scheduleSettle();
+          });
+        }
+
+        clearCompleted.addEventListener("click", () => {
+          state.todos = state.todos.filter((todo) => !todo.completed);
+          render();
+          scheduleSettle();
+        });
+
+        window.__bench = {
+          fixture: "todomvc",
+          isReady: () => body.dataset.appReady === "true",
+          isSettled: () => body.dataset.uiSettled === "true",
+          snapshot: () => ({
+            ready: body.dataset.appReady === "true",
+            settled: body.dataset.uiSettled === "true",
+            filter: state.filter,
+            totalCount: state.todos.length,
+            activeCount: activeCount(),
+            completedCount: completedCount(),
+            visibleTitles: visibleTodos().map((todo) => todo.title),
+            completedTitles: state.todos.filter((todo) => todo.completed).map((todo) => todo.title),
+            skeletonVisible: !bootShell.hidden,
+            readyBadge: readyBadge.textContent.trim(),
+          }),
+        };
+
+        setTimeout(() => {
+          state.todos = seedTodos.map((todo) => ({ ...todo }));
+          render();
+          body.dataset.appReady = "true";
+          body.classList.remove("is-booting");
+          body.classList.add("is-ready");
+          bootShell.hidden = true;
+          app.hidden = false;
+          scheduleSettle();
+        }, BOOT_DELAY_MS);
+      })();
+    </script>
+  </body>
+</html>

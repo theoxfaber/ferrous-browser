@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ferrous Openverse Fixture</title>
+    <link rel="stylesheet" href="./app.css">
+  </head>
+  <body class="is-booting" data-app-ready="false" data-ui-settled="false" data-view="boot">
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Realistic Fixture</p>
+          <h1>Openverse-style, but deterministic.</h1>
+          <p class="deck">
+            Search results, filters, and a screenshot-grade detail panel with obvious loading states.
+          </p>
+        </div>
+        <div class="status-cluster">
+          <div class="status-chip view-chip">booting</div>
+          <div class="status-chip badge-chip">warming up</div>
+        </div>
+      </header>
+
+      <section class="boot-shell" aria-live="polite">
+        <div class="pulse-line wide"></div>
+        <div class="pulse-line mid"></div>
+        <div class="pulse-grid">
+          <div class="pulse-frame"></div>
+          <div class="pulse-frame"></div>
+          <div class="pulse-frame"></div>
+        </div>
+      </section>
+
+      <main class="app-shell" hidden>
+        <section class="search-head panel">
+          <div>
+            <p class="eyebrow">Openverse Example</p>
+            <h2>Search with visual settling pressure</h2>
+          </div>
+          <div class="search-pill">
+            <span class="search-label">Query</span>
+            <span class="search-query">quiet cities</span>
+          </div>
+        </section>
+
+        <section class="control-row panel">
+          <div class="control-group">
+            <p class="control-label">Media type</p>
+            <div class="chip-row media-group">
+              <button class="filter-chip media-all is-active" data-media="all" type="button">All</button>
+              <button class="filter-chip media-image" data-media="image" type="button">Images</button>
+              <button class="filter-chip media-audio" data-media="audio" type="button">Audio</button>
+            </div>
+          </div>
+          <div class="control-group">
+            <p class="control-label">License</p>
+            <div class="chip-row license-group">
+              <button class="filter-chip license-all is-active" data-license="all" type="button">All</button>
+              <button class="filter-chip license-cc0" data-license="cc0" type="button">CC0</button>
+            </div>
+          </div>
+          <div class="summary-card">
+            <span class="summary-count">4 results</span>
+            <span class="summary-detail">Screenshot should wait for the detail panel to finish hydrating.</span>
+          </div>
+        </section>
+
+        <section class="results-view panel">
+          <div class="results-head">
+            <div>
+              <p class="eyebrow">Search Results</p>
+              <h3>Visible cards</h3>
+            </div>
+            <div class="result-badge">stable source</div>
+          </div>
+          <div class="result-grid" aria-live="polite"></div>
+        </section>
+
+        <section class="detail-view panel" hidden>
+          <div class="detail-head">
+            <button class="back-to-results" type="button">Back to results</button>
+            <div class="detail-status">syncing detail</div>
+          </div>
+          <div class="detail-loading" aria-live="polite">
+            <div class="pulse-detail"></div>
+            <div class="pulse-line wide"></div>
+            <div class="pulse-line mid"></div>
+          </div>
+          <div class="detail-body" hidden>
+            <div class="detail-hero">
+              <div class="detail-preview">
+                <div class="detail-preview-overlay">Verified visual settle</div>
+              </div>
+              <div class="detail-copy">
+                <p class="eyebrow">Media Detail</p>
+                <h3 class="detail-title">Loading</h3>
+                <p class="detail-provider"></p>
+                <div class="detail-meta"></div>
+                <p class="detail-description"></p>
+                <div class="tag-row"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      (() => {
+        const BOOT_DELAY_MS = 240;
+        const FILTER_DELAY_MS = 110;
+        const DETAIL_DELAY_MS = 140;
+        const SETTLE_DELAY_MS = 70;
+        const TARGET_ID = "quiet-morning-stacks";
+
+        const seedItems = [
+          {
+            id: "rooftops-at-noon",
+            title: "Rooftops at Noon",
+            kind: "image",
+            license: "cc0",
+            provider: "Smithsonian Open Access",
+            description: "Layered rooftops with sun glare, useful for layout stress.",
+            tags: ["urban", "sunlight", "panorama"],
+            palette: "sun",
+          },
+          {
+            id: "streetcar-ambience",
+            title: "Streetcar Ambience",
+            kind: "audio",
+            license: "by",
+            provider: "Jamendo",
+            description: "A transport soundscape that should disappear once image-only filters land.",
+            tags: ["audio", "transit", "field-recording"],
+            palette: "night",
+          },
+          {
+            id: TARGET_ID,
+            title: "Quiet Morning Stacks",
+            kind: "image",
+            license: "cc0",
+            provider: "Openverse Catalog",
+            description: "A crisp reading room shot with enough structure to make an early screenshot obvious.",
+            tags: ["masonry", "dawn", "urban"],
+            palette: "mist",
+          },
+          {
+            id: "marble-atrium",
+            title: "Marble Atrium",
+            kind: "image",
+            license: "by",
+            provider: "Europeana",
+            description: "High-contrast interior geometry that should be filtered out by the CC0 constraint.",
+            tags: ["atrium", "museum", "geometry"],
+            palette: "marble",
+          },
+        ];
+
+        const body = document.body;
+        const bootShell = document.querySelector(".boot-shell");
+        const appShell = document.querySelector(".app-shell");
+        const viewChip = document.querySelector(".view-chip");
+        const badgeChip = document.querySelector(".badge-chip");
+        const resultsView = document.querySelector(".results-view");
+        const detailView = document.querySelector(".detail-view");
+        const resultGrid = document.querySelector(".result-grid");
+        const summaryCount = document.querySelector(".summary-count");
+        const detailStatus = document.querySelector(".detail-status");
+        const detailLoading = document.querySelector(".detail-loading");
+        const detailBody = document.querySelector(".detail-body");
+        const detailTitle = document.querySelector(".detail-title");
+        const detailProvider = document.querySelector(".detail-provider");
+        const detailDescription = document.querySelector(".detail-description");
+        const detailMeta = document.querySelector(".detail-meta");
+        const tagRow = document.querySelector(".tag-row");
+
+        const state = {
+          view: "boot",
+          query: "quiet cities",
+          mediaType: "all",
+          license: "all",
+          detailId: null,
+          detailReady: false,
+          settleToken: 0,
+          pendingRemote: 0,
+          items: seedItems.map((item) => ({ ...item })),
+        };
+
+        function currentItem() {
+          return state.items.find((item) => item.id === state.detailId) || null;
+        }
+
+        function visibleItems() {
+          return state.items.filter((item) => {
+            const mediaMatch = state.mediaType === "all" || item.kind === state.mediaType;
+            const licenseMatch = state.license === "all" || item.license === state.license;
+            return mediaMatch && licenseMatch;
+          });
+        }
+
+        function setSettled(value) {
+          body.dataset.uiSettled = value ? "true" : "false";
+          const label = state.view === "boot" ? "booting" : state.view;
+          viewChip.textContent = value ? label : `${label}...`;
+          badgeChip.textContent = value ? `${label} settled` : `${label} syncing`;
+          detailStatus.textContent = state.detailReady ? "detail ready" : "syncing detail";
+        }
+
+        function scheduleSettle() {
+          const token = ++state.settleToken;
+          setSettled(false);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setTimeout(() => {
+                if (token !== state.settleToken || state.pendingRemote > 0) return;
+                setSettled(true);
+              }, SETTLE_DELAY_MS);
+            });
+          });
+        }
+
+        function beginRemoteChange() {
+          state.pendingRemote += 1;
+          setSettled(false);
+        }
+
+        function endRemoteChange() {
+          state.pendingRemote = Math.max(0, state.pendingRemote - 1);
+          render();
+          scheduleSettle();
+        }
+
+        function updateFilterButtons() {
+          for (const button of document.querySelectorAll(".media-group .filter-chip")) {
+            button.classList.toggle("is-active", button.dataset.media === state.mediaType);
+          }
+          for (const button of document.querySelectorAll(".license-group .filter-chip")) {
+            button.classList.toggle("is-active", button.dataset.license === state.license);
+          }
+        }
+
+        function renderResults() {
+          const items = visibleItems();
+          summaryCount.textContent = `${items.length} results`;
+          resultGrid.replaceChildren(
+            ...items.map((item) => {
+              const card = document.createElement("article");
+              card.className = `result-card palette-${item.palette}`;
+              card.dataset.id = item.id;
+
+              const preview = document.createElement("div");
+              preview.className = "card-preview";
+
+              const overlay = document.createElement("div");
+              overlay.className = "card-overlay";
+              overlay.textContent = `${item.kind.toUpperCase()} · ${item.license.toUpperCase()}`;
+              preview.append(overlay);
+
+              const title = document.createElement("h4");
+              title.className = "card-title";
+              title.textContent = item.title;
+
+              const provider = document.createElement("p");
+              provider.className = "card-provider";
+              provider.textContent = item.provider;
+
+              const desc = document.createElement("p");
+              desc.className = "card-description";
+              desc.textContent = item.description;
+
+              const open = document.createElement("button");
+              open.className = "open-detail";
+              open.type = "button";
+              open.dataset.id = item.id;
+              open.textContent = "Inspect detail";
+
+              card.append(preview, title, provider, desc, open);
+              return card;
+            }),
+          );
+        }
+
+        function renderDetail() {
+          const item = currentItem();
+          detailLoading.hidden = state.detailReady;
+          detailBody.hidden = !state.detailReady;
+          if (!item || !state.detailReady) {
+            return;
+          }
+
+          detailTitle.textContent = item.title;
+          detailProvider.textContent = item.provider;
+          detailDescription.textContent = item.description;
+
+          detailMeta.replaceChildren();
+          for (const value of [item.kind.toUpperCase(), item.license.toUpperCase(), "settled"]) {
+            const chip = document.createElement("span");
+            chip.className = "meta-chip";
+            chip.textContent = value;
+            detailMeta.append(chip);
+          }
+
+          tagRow.replaceChildren(
+            ...item.tags.map((tag) => {
+              const chip = document.createElement("span");
+              chip.className = "tag-chip";
+              chip.textContent = tag;
+              return chip;
+            }),
+          );
+
+          detailBody.querySelector(".detail-preview").className = `detail-preview palette-${item.palette}`;
+          detailBody.querySelector(".detail-preview-overlay").textContent = `${item.provider} · ${item.license.toUpperCase()}`;
+        }
+
+        function render() {
+          const ready = body.dataset.appReady === "true";
+          body.dataset.view = state.view;
+          bootShell.hidden = ready;
+          appShell.hidden = !ready;
+
+          resultsView.hidden = state.view !== "search";
+          detailView.hidden = state.view !== "detail";
+
+          updateFilterButtons();
+          renderResults();
+          renderDetail();
+        }
+
+        function openDetail(id) {
+          state.view = "detail";
+          state.detailId = id;
+          state.detailReady = false;
+          render();
+          beginRemoteChange();
+          setTimeout(() => {
+            state.detailReady = true;
+            endRemoteChange();
+          }, DETAIL_DELAY_MS);
+        }
+
+        function applyFilter(kind, value) {
+          if (state[kind] === value) {
+            scheduleSettle();
+            return;
+          }
+          beginRemoteChange();
+          setTimeout(() => {
+            state[kind] = value;
+            state.view = "search";
+            state.detailId = null;
+            state.detailReady = false;
+            endRemoteChange();
+          }, FILTER_DELAY_MS);
+        }
+
+        document.querySelector(".media-group").addEventListener("click", (event) => {
+          const button = event.target.closest(".filter-chip");
+          if (!button) return;
+          applyFilter("mediaType", button.dataset.media);
+        });
+
+        document.querySelector(".license-group").addEventListener("click", (event) => {
+          const button = event.target.closest(".filter-chip");
+          if (!button) return;
+          applyFilter("license", button.dataset.license);
+        });
+
+        resultGrid.addEventListener("click", (event) => {
+          const button = event.target.closest(".open-detail");
+          if (!button) return;
+          openDetail(button.dataset.id);
+        });
+
+        document.querySelector(".back-to-results").addEventListener("click", () => {
+          state.view = "search";
+          state.detailId = null;
+          state.detailReady = false;
+          render();
+          scheduleSettle();
+        });
+
+        window.__bench = {
+          fixture: "openverse",
+          isReady: () => body.dataset.appReady === "true",
+          isSettled: () => body.dataset.uiSettled === "true",
+          snapshot: () => {
+            const item = currentItem();
+            const visible = visibleItems();
+            return {
+              ready: body.dataset.appReady === "true",
+              settled: body.dataset.uiSettled === "true",
+              view: state.view,
+              query: state.query,
+              mediaType: state.mediaType,
+              license: state.license,
+              skeletonVisible: !bootShell.hidden,
+              resultsVisible: !resultsView.hidden,
+              detailVisible: !detailView.hidden,
+              resultCount: visible.length,
+              visibleTitles: visible.map((entry) => entry.title),
+              detailTitle: item ? item.title : null,
+              detailReady: state.detailReady,
+              detailProvider: item ? item.provider : null,
+              detailKind: item ? item.kind : null,
+              detailLicense: item ? item.license : null,
+              detailTags: item ? item.tags : [],
+            };
+          },
+        };
+
+        setTimeout(() => {
+          body.dataset.appReady = "true";
+          body.classList.remove("is-booting");
+          state.view = "search";
+          render();
+          scheduleSettle();
+        }, BOOT_DELAY_MS);
+      })();
+    </script>
+  </body>
+</html>

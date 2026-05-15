@@ -1,9 +1,10 @@
 use futures_util::SinkExt;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::Instrument;
@@ -16,7 +17,7 @@ pub struct CDPRequest {
     /// Unique request ID
     pub id: u32,
     /// CDP method name
-    pub method: String,
+    pub method: Cow<'static, str>,
     /// Optional parameters for the method
     pub params: Option<Value>,
     /// Optional session ID for targeting specific pages
@@ -25,10 +26,10 @@ pub struct CDPRequest {
 
 impl CDPRequest {
     /// Create a new CDP request
-    pub fn new(id: u32, method: String, params: Option<Value>) -> Self {
+    pub fn new(id: u32, method: &'static str, params: Option<Value>) -> Self {
         Self {
             id,
-            method,
+            method: Cow::Borrowed(method),
             params,
             session_id: None,
         }
@@ -37,13 +38,13 @@ impl CDPRequest {
     /// Create a CDP request with session ID
     pub fn with_session(
         id: u32,
-        method: String,
+        method: &'static str,
         params: Option<Value>,
         session_id: String,
     ) -> Self {
         Self {
             id,
-            method,
+            method: Cow::Borrowed(method),
             params,
             session_id: Some(session_id),
         }
@@ -135,19 +136,37 @@ pub struct CDPClient {
     /// Sender side of the writer-task mailbox. `None` until `set_writer` is
     /// called from `Browser::connect_internal`.
     ws_tx: Arc<StdMutex<Option<mpsc::UnboundedSender<Message>>>>,
+    /// Latched "is the CDP connection dead?" signal. Transitions false→true
+    /// exactly once when `fail_all_pending` is called from
+    /// `Connection::run`'s termination. Long-running wait loops in
+    /// `Page::goto` watch this so they can return a disconnect error
+    /// promptly instead of hanging on a broadcast channel that never sees
+    /// new events but also never closes (CDPClient is kept alive by all
+    /// Pages holding Arc clones, even after the underlying WebSocket is
+    /// gone — so `RecvError::Closed` on its own is not a reliable signal).
+    disconnected_tx: watch::Sender<bool>,
 }
 
 impl CDPClient {
     /// Create a new CDP client
     pub fn new(ws_url: String) -> Self {
         let (event_broadcast, _) = broadcast::channel(1024);
+        let (disconnected_tx, _) = watch::channel(false);
         Self {
             ws_url,
             message_id_counter: Arc::new(AtomicU32::new(1)),
             pending_responses: Arc::new(StdMutex::new(HashMap::new())),
             event_broadcast,
             ws_tx: Arc::new(StdMutex::new(None)),
+            disconnected_tx,
         }
+    }
+
+    /// Subscribe to the disconnect signal. Returns a `watch::Receiver<bool>`
+    /// that starts at `false` and transitions to `true` exactly once when
+    /// the CDP connection terminates (see `fail_all_pending`).
+    pub fn disconnected(&self) -> watch::Receiver<bool> {
+        self.disconnected_tx.subscribe()
     }
 
     /// Install the writer-task mailbox. Called once by
@@ -171,7 +190,7 @@ impl CDPClient {
     > {
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.ws_url)
             .await
-            .map_err(|e| BrowserError::connection_failed(&self.ws_url, e.to_string()))?;
+            .map_err(|e| BrowserError::connection_failed(self.ws_url.clone(), e.to_string()))?;
 
         Ok(ws_stream)
     }
@@ -204,11 +223,11 @@ impl CDPClient {
     ///
     /// The response handler is registered **before** the message is sent so
     /// that fast Chrome replies are never dropped.
-    #[tracing::instrument(level = "info", skip(self, params), fields(method = %method, id))]
-    pub async fn send_command(&self, method: String, params: Option<Value>) -> Result<Value> {
+    #[tracing::instrument(level = "info", skip(self, params), fields(method = method, id))]
+    pub async fn send_command(&self, method: &'static str, params: Option<Value>) -> Result<Value> {
         let id = self.next_id();
         tracing::Span::current().record("id", id);
-        let request = CDPRequest::new(id, method.clone(), params);
+        let request = CDPRequest::new(id, method, params);
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
@@ -223,7 +242,7 @@ impl CDPClient {
             match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(_)) => Err(BrowserError::command_failed(
-                    &method,
+                    method,
                     "response channel closed unexpectedly",
                 )),
                 Err(_) => {
@@ -244,16 +263,16 @@ impl CDPClient {
     /// Send a command to a specific page session.
     ///
     /// The response handler is registered **before** the message is sent.
-    #[tracing::instrument(level = "info", skip(self, params), fields(method = %method, id, session_id = %session_id))]
+    #[tracing::instrument(level = "info", skip(self, params), fields(method = method, id, session_id = %session_id))]
     pub async fn send_command_with_session(
         &self,
         session_id: &str,
-        method: String,
+        method: &'static str,
         params: Option<Value>,
     ) -> Result<Value> {
         let id = self.next_id();
         tracing::Span::current().record("id", id);
-        let request = CDPRequest::with_session(id, method.clone(), params, session_id.to_string());
+        let request = CDPRequest::with_session(id, method, params, session_id.to_string());
 
         // ── Register handler BEFORE sending ──────────────────────────────────
         let (tx, rx) = oneshot::channel();
@@ -268,7 +287,7 @@ impl CDPClient {
             match timeout(Duration::from_secs(TIMEOUT_SECS), rx).await {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(_)) => Err(BrowserError::command_failed(
-                    &method,
+                    method,
                     "response channel closed unexpectedly",
                 )),
                 Err(_) => {
@@ -308,6 +327,11 @@ impl CDPClient {
         let count = pending.len();
         pending.clear(); // dropping the senders signals the receivers
         drop(pending);
+        // Latch the disconnect signal so long-running wait loops watching
+        // `disconnected()` can return promptly. We intentionally do this
+        // after the pending-responses drop so any task observing both
+        // sees a consistent "everything is dead" state.
+        let _ = self.disconnected_tx.send(true);
         if count > 0 {
             tracing::warn!(
                 pending_count = count,
@@ -377,7 +401,7 @@ mod tests {
     fn test_cdp_request_creation() {
         let req = CDPRequest::new(
             1,
-            "Page.navigate".to_string(),
+            "Page.navigate",
             Some(json!({"url": "https://example.com"})),
         );
         assert_eq!(req.id, 1);
@@ -389,7 +413,7 @@ mod tests {
     fn test_cdp_request_to_json() {
         let req = CDPRequest::new(
             1,
-            "Page.navigate".to_string(),
+            "Page.navigate",
             Some(json!({"url": "https://example.com"})),
         );
         let json = req.to_json();
@@ -427,7 +451,7 @@ mod tests {
     fn test_cdp_request_with_session() {
         let req = CDPRequest::with_session(
             2,
-            "Runtime.evaluate".to_string(),
+            "Runtime.evaluate",
             Some(json!({"expression": "1+1"})),
             "SES001".to_string(),
         );
