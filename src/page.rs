@@ -7,6 +7,7 @@ use tracing::Instrument;
 
 use crate::cdp::CDPClient;
 use crate::error::{BrowserError, Result};
+use crate::har::HarCapture;
 
 // ─── P2: WaitUntil enum ──────────────────────────────────────────────────────
 
@@ -957,6 +958,37 @@ impl Page {
             .ok_or_else(|| BrowserError::invalid_response("pdf()", "missing data field"))?;
 
         base64_decode(base64_data)
+    }
+
+    // ─── HAR / Trace capture ─────────────────────────────────────────────
+
+    /// Start capturing HTTP Archive (HAR) data for this page.
+    ///
+    /// Enables the Network domain and begins collecting request/response
+    /// entries. Use [`HarCapture::stop`] to get the complete HAR archive,
+    /// or [`HarCapture::export`] for a snapshot while continuing to capture.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrous_browser::{Browser, WaitUntil};
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let browser = Browser::launch_chrome(None).await?;
+    /// let page = browser.new_page().await?;
+    ///
+    /// let mut har = page.start_har_capture().await?;
+    /// page.goto("https://example.com", WaitUntil::Load).await?;
+    ///
+    /// let archive = har.stop().await;
+    /// let json = serde_json::to_string_pretty(&archive)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn start_har_capture(&self) -> Result<HarCapture> {
+        let capture = HarCapture::new(self.cdp.clone(), self.session_id.clone());
+        capture.start().await?;
+        Ok(capture)
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────

@@ -111,8 +111,12 @@ pub mod browser;
 /// Page automation API
 pub mod page;
 
+/// HTTP Archive (HAR) capture
+pub mod har;
+
 pub use browser::{Browser, BrowserConfig};
 pub use error::{BrowserError, ResultExt};
+pub use har::HarCapture;
 pub use page::{Cookie, Locator, Page, WaitUntil};
 
 #[cfg(test)]

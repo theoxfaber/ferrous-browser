@@ -2,14 +2,13 @@ use crate::cdp::{spawn_writer_task, CDPClient};
 use crate::connection::Connection;
 use crate::error::{BrowserError, Result};
 use crate::page::Page;
-use nix::unistd::Pid;
 use serde_json::json;
 use std::net::TcpListener;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
@@ -81,20 +80,35 @@ impl Default for BrowserConfig {
 pub struct Browser {
     cdp: Arc<CDPClient>,
     pages: Arc<RwLock<Vec<Page>>>,
-    _child_pid: Option<Pid>,
+    _child: Option<Child>,
 }
 
 impl Browser {
     fn find_chrome() -> Option<String> {
-        let candidates = [
+        #[cfg(target_os = "macos")]
+        let candidates: &[&str] = &[
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
             "google-chrome",
             "chromium-browser",
             "chromium",
+        ];
+        #[cfg(target_os = "linux")]
+        let candidates: &[&str] = &[
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium-browser",
+            "chromium",
+        ];
+        #[cfg(target_os = "windows")]
+        let candidates: &[&str] = &[
             "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
             "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            "chrome",
         ];
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        let candidates: &[&str] = &["google-chrome", "chromium-browser", "chromium"];
+
         for candidate in candidates {
             if std::path::Path::new(candidate).exists() || which::which(candidate).is_ok() {
                 return Some(candidate.to_string());
@@ -176,7 +190,7 @@ impl Browser {
         let pid = child.id().ok_or_else(|| {
             BrowserError::BrowserNotLaunched("Chrome exited before reporting a pid".to_string())
         })?;
-        let pid = Pid::from_raw(pid as i32);
+        tracing::debug!(pid, "Chrome launched successfully");
 
         // Chrome announces readiness on stderr as soon as the devtools server
         // is listening:
@@ -215,11 +229,7 @@ impl Browser {
                 ))
             })??;
 
-        // The tokio Child handle is no longer needed; lifetime is managed via
-        // the stored Pid + SIGTERM in Drop, exactly as before.
-        drop(child);
-
-        Self::connect_internal(ws_url, Some(pid)).await
+        Self::connect_internal(ws_url, Some(child)).await
     }
 
     /// Connect to a CDP WebSocket URL directly.
@@ -256,7 +266,7 @@ impl Browser {
         Self::connect("ws://localhost:9222".to_string()).await
     }
 
-    async fn connect_internal(ws_url: String, pid: Option<Pid>) -> Result<Self> {
+    async fn connect_internal(ws_url: String, child: Option<Child>) -> Result<Self> {
         use futures_util::StreamExt;
         let cdp = Arc::new(CDPClient::new(ws_url));
         let ws_stream = cdp.connect().await?;
@@ -283,7 +293,7 @@ impl Browser {
         Ok(Browser {
             cdp,
             pages: Arc::new(RwLock::new(Vec::new())),
-            _child_pid: pid,
+            _child: child,
         })
     }
 
@@ -362,8 +372,10 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        if let Some(pid) = self._child_pid {
-            let _ = nix::sys::signal::kill(pid, nix::sys::signal::SIGTERM);
+        if let Some(child) = self._child.as_mut() {
+            let _ = child.start_kill().map_err(|e| {
+                tracing::warn!(error = %e, "Failed to kill Chrome process");
+            });
         }
     }
 }
